@@ -179,7 +179,12 @@ void dispatch_call(CPU *c, uint32_t addr) {
         return;
     }
     if (a < 0x10000) {   // kernel RAM: code the real BIOS would have here does not exist
-        DBG(1, "[cpu] call into kernel RAM %08x ignored (ra=%08x)\n", addr, c->r[31]);
+        static uint32_t seen[16];
+        static int nseen;
+        bool known = false;
+        for (int i = 0; i < nseen; i++) known |= seen[i] == addr;
+        if (!known && nseen < 16) seen[nseen++] = addr;
+        if (!known) LOG("[cpu] call into kernel RAM %08x ignored (ra=%08x)\n", addr, c->r[31]);
         return;
     }
     RecompFn f = lookup(addr);

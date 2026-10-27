@@ -318,11 +318,9 @@ static void rtp(int v, bool last) {
     if (widescreen_active) sx = OFX + (sx - OFX) * 3 / 4;
     set_mac0(sx); set_mac0(sy);
     bool ok = push_sxy(sx >> 16, sy >> 16);
-    // Precise projection for the high-resolution renderer. Where the hardware result is
-    // unusable (saturated somewhere along the way, or the vertex too close to or behind the
-    // camera: the near edge of the road), the precise one is kept all the same, as a homogeneous
-    // position whose depth may be negative, and flagged: the renderer clips such polygons at the
-    // camera plane instead of drawing them from the clamped coordinates, or not at all.
+    // Precise projection for the high-resolution renderer. Where the hardware result saturates
+    // (a vertex near or behind the camera, like the road's near edge) it is kept as a flagged
+    // homogeneous position, possibly behind the camera, which the renderer clips at the camera plane.
     int64_t m1 = x >> 12, m2 = y >> 12;
     if (sf_shift == 12) {
         double zf = (double)z / 4096.0;

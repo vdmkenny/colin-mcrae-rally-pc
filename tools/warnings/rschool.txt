@@ -1,0 +1,7 @@
+800ae17c patched
+800ae180 patched
+800ae184 patched
+800ae188 jr
+800ae188 patched
+800ae18c patched
+800b2a00 jr

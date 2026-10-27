@@ -1,0 +1,10 @@
+800b4d3c jr
+800b4d50 jr
+800b4ee8 jr
+800b6518 patched
+800b651c patched
+800b6520 patched
+800b6524 jr
+800b6524 patched
+800b6528 patched
+800bad9c jr

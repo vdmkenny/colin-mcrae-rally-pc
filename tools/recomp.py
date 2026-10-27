@@ -45,10 +45,13 @@ class Module:
         self.ghidra = ghidra_funcs
         self.extra = extra_entries
         self.cache = {}
-        self.warnings = []
+        self.warnings = {}   # (address, kind) -> detail
         self.track_prov = False
         self.hooks = {}
         self.smc = {}
+
+    def warn(self, a, kind, detail):
+        self.warnings.setdefault((a, kind), detail)
 
     def insn(self, a):
         i = self.cache.get(a)
@@ -172,9 +175,9 @@ class Module:
             elif i.op in SMC_BRANCH_OPS:
                 self.smc[t] = "branch"
             else:
-                self.warnings.append(f"{t:08x}: patched at run time by "
-                                     + ", ".join(f"{pc:08x}" for pc, _, _ in sorted(writers))
-                                     + f", not supported ({i})")
+                self.warn(t, "patched", "patched at run time by "
+                          + ", ".join(f"{pc:08x}" for pc, _, _ in sorted(writers))
+                          + f", not supported ({i})")
 
     # ----------------------------------------------------------------- jump tables
     def const_before(self, reg, pc, lo_limit):
@@ -286,8 +289,8 @@ class Module:
                         if tbl:
                             tables[a] = tbl
                             work.extend(tbl)
-                        else:
-                            self.warnings.append(f"{a:08x}: unresolved jr {i}")
+                        elif not bios_stub(self, a - 4):
+                            self.warn(a, "jr", f"unresolved jr {i}")
                     break
                 a += 8  # jal / jalr return here
         return seen, tables
@@ -537,10 +540,15 @@ def gen_function(m, entry, protos):
         if is_slot(a) and (a + 4) in body:
             labels.add(a + 4)  # executing a slot directly continues after it
 
-    out = [f"void {m.fname(entry)}(CPU *c) {{", f"FN_ENTER(0x{entry:08x}u);"]
+    # a hooked function runs its hook first, which is given the original to call
     hook = m.hooks.get(entry)
     if hook:
-        out.append(f"if ({hook}(c)) return;")
+        orig = f"{m.fname(entry)}_orig"
+        out = [f"static void {orig}(CPU *c);",
+               f"void {m.fname(entry)}(CPU *c) {{ FN_ENTER(0x{entry:08x}u); if (!{hook}(c, {orig})) {orig}(c); }}",
+               f"static void {orig}(CPU *c) {{"]
+    else:
+        out = [f"void {m.fname(entry)}(CPU *c) {{", f"FN_ENTER(0x{entry:08x}u);"]
     # Hand-written code sometimes keeps ra in another register and returns with
     # `jr reg`; an unresolved indirect jump to the entry return address is a return.
     if any(m.insn(a).op == "jr" and m.insn(a).rs != 31 and a not in tables for a in addrs if not is_slot(a)):
@@ -599,7 +607,7 @@ def gen_function(m, entry, protos):
         dl = []
         if d is not None:
             if d.has_delay:
-                m.warnings.append(f"{a:08x}: branch in delay slot")
+                m.warn(a, "delay-slot", "branch in delay slot")
             else:
                 emit_insn(m, d, dl)
                 ncyc += 1
@@ -695,7 +703,7 @@ def generate(m, outdir):
     with open(os.path.join(outdir, f"{m.name}.h"), "w") as f:
         f.write('#pragma once\n#include "recomp.h"\n\n')
         for h in sorted(set(m.hooks.values())):
-            f.write(f"int {h}(CPU *c);\n")
+            f.write(f"int {h}(CPU *c, RecompFn orig);\n")
         for e in sorted(done | protos):
             f.write(f"void {m.fname(e)}(CPU *c);\n")
     with open(os.path.join(outdir, f"{m.name}_table.c"), "w") as f:
@@ -711,13 +719,29 @@ def generate(m, outdir):
     return len(done), len(files)
 
 
+def check_warnings(m, path, accept):
+    """Warnings not in the reviewed list at path (address and kind per line); with accept, the
+    list is rewritten to match instead."""
+    keys = {f"{a:08x} {kind}" for a, kind in m.warnings}
+    if accept:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("".join(k + "\n" for k in sorted(keys)))
+        return []
+    known = set(open(path).read().split("\n")) if os.path.exists(path) else set()
+    return [f"{m.name} {k}: {m.warnings[(int(k[:8], 16), k[9:])]}" for k in sorted(keys - known)]
+
+
 def main():
-    bins, outdir = sys.argv[1], sys.argv[2]
+    accept = "--accept-warnings" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--accept-warnings"]
+    bins, outdir = args[0], args[1]
     tools_dir = os.path.dirname(os.path.abspath(__file__))
-    gdir = sys.argv[3] if len(sys.argv) > 3 else None
+    gdir = args[2] if len(args) > 2 else None
     extra_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entries")
     hooks = load_hooks(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks.txt"))
     sources = []
+    new_warnings = []
     for name, fn, base, entry in MODULES:
         m = Module(name, os.path.join(bins, fn), base, entry,
                    load_ghidra(os.path.join(gdir, f"{name}.funcs.txt") if gdir
@@ -734,7 +758,8 @@ def main():
         print(f"{name}: {nf} functions in {nfiles} files, {len(m.smc)} patched instructions, "
               f"{len(m.warnings)} warnings")
         with open(os.path.join(outdir, name, "warnings.txt"), "w") as f:
-            f.write("\n".join(m.warnings) + "\n")
+            f.write("".join(f"{a:08x}: {d}\n" for (a, _), d in sorted(m.warnings.items())))
+        new_warnings += check_warnings(m, os.path.join(tools_dir, "warnings", f"{name}.txt"), accept)
     with open(os.path.join(outdir, "modules.c"), "w") as f:
         f.write('#include "recomp.h"\n\n')
         for name, _ in sources:
@@ -752,6 +777,10 @@ def main():
             for n in range(nfiles):
                 f.write(f"    ${{GEN_DIR}}/{name}/{name}_{n:03d}.c\n")
         f.write(")\n")
+    if new_warnings:
+        print("\n".join(new_warnings))
+        sys.exit("new recompiler warnings: check them, then rerun with --accept-warnings to add "
+                 "them to tools/warnings/")
 
 
 if __name__ == "__main__":

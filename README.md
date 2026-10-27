@@ -43,7 +43,9 @@ This is an unofficial fan project, not affiliated with Codemasters or Sony.
 - Longer draw distance and less culling: while the game draws a scene, its far limit is raised
   up to 2x (as far as the 16-bit screen depth allows) on stages without fog in view, and its
   view cone, as wide as the 4:3 picture on the console, is widened to the 16:9 one plus a
-  margin so scenery does not pop in at the edges. The game's logic keeps its own values.
+  margin so scenery does not pop in at the edges. The depth-sorting table is resized to match,
+  so distant scenery cannot wrap round and be drawn in front. The game's logic keeps its own
+  values.
   `--draw-distance 1..2` or `draw_distance = ...` (1 = original); foggy and rainy stages
   keep their fog
 - More memory than the console: the game sees 8 MB of RAM instead of 2 MB, and its two GPU
@@ -156,12 +158,16 @@ Settings and memory cards live in the user preferences folder
 - `tools/recomp.py` translates each executable (boot loader, frontend, game, rally school)
   into C. Functions are discovered from a Ghidra analysis (`tools/functions/`), jal targets
   and code pointers; branches and delay slots map to gotos, `jal` to C calls, jump tables
-  to `switch`. `tools/hooks.txt` attaches native code to specific game functions
-  (`runtime/hooks.c`): the 60 fps races hook the main loop, the controller poll, the race and
-  replay updates, the scene renderer and the shadow drawing; unlock all wraps the frontend's
-  progress loading, merging and copying (and the BIOS card write) so saves keep the player's
-  own unlocks; the draw distance and view cone are raised around
-  the scene renderer; the primitive buffers are swapped in the main loop.
+  to `switch`. `tools/hooks.txt` attaches native code to specific game functions, each hook
+  given the recompiled original to call: the 60 fps races (`runtime/race60.c`) hook the main
+  loop, the controller poll, the race and replay updates, the scene renderer and the shadow
+  drawing; the draw distance and view cone are raised around the scene renderer and the
+  primitive buffers swapped in the main loop (`runtime/view.c`); unlock all (`runtime/unlock.c`)
+  wraps the frontend's progress loading, merging and copying (and the BIOS card write) so saves
+  keep the player's own unlocks. Game addresses are in `runtime/symbols.h`.
+- The recompiler's warnings (data decoded as code, jumps through registers) are checked against
+  a reviewed list in `tools/warnings/`; generation fails on a new one until it is looked at and
+  accepted with `--accept-warnings`.
 - The game rewrites parts of its own rendering code while it runs: the ambient light colour
   and the screen clipping bounds are patched into instruction immediates, and mirrored views
   flip a culling branch. The recompiler finds these patch sites (stores to constant code
@@ -198,6 +204,11 @@ container), with identical output and no Vulkan validation errors. Races run at 
 stage finishes, results, the next stage and two-player split screen work in that mode, and the
 car's path is identical to 30 fps tick for tick. A full championship has not been played
 through, so later stages and end-of-rally screens are less tested.
+
+Regression test (needs your disc, so it runs locally): record references once on a good build
+with `python3 tools/regress.py build/cmrally record`, then `ctest --test-dir build` compares
+race screenshots, with and without unlock-all, and checks that the car's path is identical at
+30 and 60 fps.
 
 Development aids: `--log N`, `--turbo`, `--hidden`, `--exit-after N`, `--shot-every N --shot-dir D`,
 `--script "from-to:buttons[:twist[:throttle]];..."` (`--script2` for port 2), `--wav file.wav`,

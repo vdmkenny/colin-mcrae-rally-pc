@@ -1,5 +1,6 @@
 # Native hooks run at the entry of a recompiled function: <module> <address> <C function>.
-# A hook returns nonzero when it fully replaces the function. See runtime/hooks.c.
+# A hook is int fn(CPU *c, RecompFn orig) and returns nonzero when it replaces the function;
+# it may call orig, the recompiled original. See runtime/race60.c, view.c and unlock.c.
 game 80096cd4 hook_set_frame_interval
 game 80059108 hook_main_iter
 game 8004e9cc hook_race_update

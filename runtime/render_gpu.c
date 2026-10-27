@@ -1,10 +1,6 @@
-// SDL_GPU renderer (Vulkan, Metal): mirrors GPU drawing into a high-resolution copy of VRAM
-// and presents it.
-//
-// The software GPU (gpu.c) stays authoritative for the 1x VRAM the game can read back and
-// texture from. Every primitive is also drawn here at `scale` times the resolution, in true
-// colour, with sub-pixel vertex positions and perspective-correct texturing when the GTE
-// supplied precise coordinates. Textures are sampled from a 1x copy of VRAM in the shader.
+// SDL_GPU renderer (Vulkan, Metal). gpu.c stays authoritative for the 1x VRAM the game reads
+// back; every primitive is also drawn here at `scale` times the resolution in true colour, with
+// sub-pixel positions and perspective-correct texturing where the GTE gave precise coordinates.
 #include "render.h"
 #include "pgxp.h"
 #include "gpu_shaders.h"
@@ -38,10 +34,8 @@ static SDL_GPUBuffer *buf_upload;
 static uint32_t buf_upload_size;
 static SDL_GPUTexture *tex_hi;                    // high-resolution VRAM
 static SDL_GPUTexture *tex_tmp;                   // scratch for VRAM-to-VRAM copies; MSAA resolve target
-// Anti-aliasing: drawing goes to a multisampled texture that only lives for one render pass. It
-// is seeded with the current image, drawn to, and resolved into tex_tmp, which then takes the
-// place of the target (tile-based GPUs keep the samples on chip, so this costs about what loading
-// and storing the target does).
+// Anti-aliasing: each render pass seeds a multisampled texture with the current image and
+// resolves it into tex_tmp, which becomes the target (tile-based GPUs keep the samples on chip).
 static SDL_GPUTexture *tex_msaa;
 static SDL_GPUSampleCount msaa_samples = SDL_GPU_SAMPLECOUNT_1;
 static int msaa_applied;                          // render_cfg.msaa the targets were made for
@@ -84,10 +78,8 @@ static void upload_texture(SDL_GPUCopyPass *cp, uint32_t offset, SDL_GPUTexture 
 }
 
 // --------------------------------------------------------- recorded GPU work
-// Drawing is collected as vertices plus a command list and executed in as few render passes
-// as possible (each pass loads and stores the whole high-resolution target): one copy pass
-// uploads VRAM, vertices and transferred pixels first, and a render pass is only split for
-// VRAM-to-VRAM copies.
+// As few render passes as possible, since each loads and stores the whole target: one copy pass
+// uploads everything first, and only VRAM-to-VRAM copies split a render pass.
 typedef enum { G_DRAW, G_BLIT, G_COPY } GCmdType;
 typedef struct {
     uint8_t type;
@@ -290,10 +282,9 @@ void hw_set_draw_area(int x1, int y1, int x2, int y2) {
 // bilinear filtering is kept inside it so neighbouring textures on the page do not bleed in.
 // It covers the whole primitive, so the triangles of a quad filter alike along their diagonal.
 static uint32_t cur_uvlim;
-// The PlayStation samples the texel at each pixel's top-left corner. Where a flat (2D) primitive
-// maps its texture mirrored (u falling as x rises, as for flipped sprites), sampling inside the
-// pixel at high resolution lands one texel short and shows the neighbouring texel as a line along
-// the right or bottom edge; such primitives sample one texel step further on that axis.
+// The PlayStation samples at each pixel's top-left corner. A mirrored 2D primitive (flipped
+// sprite) sampled inside the pixel lands one texel short and shows its neighbour along the edge,
+// so it samples one texel further on that axis.
 static float cur_uoff, cur_voff;
 
 static void push(GVtx *o, const HwVertex *v, const HwPrim *p, uint32_t pass) {
@@ -370,11 +361,9 @@ static void draw_copy(int sx, int sy, int dx, int dy, int w, int h) {
 }
 
 // ------------------------------------------------------------ frame recording
-// High-resolution drawing is deferred: operations are recorded and rendered at the display
-// flip, or earlier when the area being drawn is on screen. The game only ever sees the 1x
-// software VRAM, so this is invisible to it. Seeing the whole frame first allows giving vertices
-// the CPU copied from GTE results the precise position of the original (closes seams between
-// polygons), and classifying primitives for widescreen.
+// Drawing is recorded and rendered at the flip (or once the area drawn is on screen); the game
+// only sees the 1x VRAM. With the whole frame in hand, vertices the CPU copied from GTE results
+// get the original's precise position (no seams), and widescreen can classify primitives.
 typedef enum { OP_TRI, OP_FILL, OP_UPLOAD, OP_COPY, OP_NONE } OpType;
 typedef struct {
     uint8_t type;
@@ -442,10 +431,8 @@ void hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
 
 void hw_vram_changed(void) { vram_dirty = true; }
 
-// Whole-frame vertex cache: vertices without precise data take the precise position of a
-// GTE vertex at the same integer screen position in the same drawing area. Clamped positions
-// (vertices too near the camera) are shared by unrelated vertices more easily; one that
-// different vertices have is not used.
+// Whole-frame vertex cache: a vertex without precise data takes that of a GTE vertex at the same
+// integer position in the same drawing area, unless different GTE vertices clamped to it there.
 #define VC_SLOTS 32768
 static struct { uint32_t xy, gen; int ox, oy; float x, y, w; uint32_t key; bool clip, ambiguous; } vc[VC_SLOTS];
 static uint32_t vc_gen = 1;
@@ -483,10 +470,9 @@ static void resolve_frame(OpList *l) {
     for (int i = 0; i < l->n; i++) {
         Op *o = &l->ops[i];
         if (o->type != OP_TRI) continue;
-        // A translucent sprite built by the CPU (a sun flare) can have one corner on a 3D vertex's
-        // pixel by coincidence; snapping it would distort the sprite and make it count as 3D in
-        // widescreen. Translucent geometry made of copied GTE vertices (the car's shadow) matches
-        // on at least two corners; opaque geometry is snapped on any match (CPU-clipped terrain).
+        // A translucent CPU-built sprite (sun flare) can share one corner with a 3D vertex by
+        // chance; copied GTE geometry (the car's shadow) matches on two. Opaque geometry snaps on
+        // any match (CPU-clipped terrain).
         int match[3] = {-1, -1, -1}, nmatch = 0;
         for (int k = 0; k < 3; k++) {
             HwVertex *v = &o->v[k];
@@ -536,13 +522,10 @@ static void resolve_frame(OpList *l) {
     }
 }
 
-// Widescreen: the GTE already widened the 3D projection; 2D elements keep their 4:3
-// proportions instead of being stretched, each anchored to the left edge, centre or right edge
-// by which third of the screen it is in. A line of text is one element: consecutive 2D
-// primitives of similar, text-like height (up to 32 pixels) side by side on the same line move
-// as a group. Sprites
-// placed in 3D (dust, smoke) keep their place and are narrowed; elements spanning the screen
-// (menu bars) stretch to the full width. Decided after the vertex resolution above.
+// Widescreen: the GTE already widened the 3D projection. 2D elements keep 4:3 proportions,
+// anchored left, centre or right by the third of the screen they are in, and a line of text
+// (2D primitives up to 32 px high side by side) moves as one. Sprites placed in 3D (dust, smoke)
+// are narrowed in place; elements spanning the screen (menu bars) stretch.
 static void squeeze_ops(OpList *l, int i, int j, float anchor) {
     for (int t = i; t < j; t++)
         if (l->ops[t].type == OP_TRI)

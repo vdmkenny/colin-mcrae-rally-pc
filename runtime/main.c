@@ -324,17 +324,10 @@ static void handle_events(void) {
     }
 }
 
-extern int frame_interval_override;
-extern bool race_60fps;
-extern float draw_distance, cull_margin;
-extern bool unlock_all;
-
 // ----------------------------------------------------------------- frames
-// With vsync, images are presented to the refresh of the monitor the window is on. When its
-// rate is a multiple of ~60 Hz (60, 120, 240 ...) each emulated vblank lasts exactly that many
-// refreshes, the image is shown for each of them, and the buffer swaps pace emulation. At other
-// rates (75, 144, 165 ...) a timer paces emulation at 59.94 Hz and each new image waits for the
-// next refresh.
+// With vsync at a multiple of ~60 Hz each emulated vblank lasts that many refreshes and the swaps
+// pace emulation; at other rates (75, 144 ...) a timer paces it at 59.94 Hz and each image waits
+// for the next refresh.
 static int refreshes_per_vblank = 1;   // display-locked: refreshes per emulated vblank; 0: timer-paced
 static int presents_counted;           // for the fps log
 

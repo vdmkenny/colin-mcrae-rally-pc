@@ -42,7 +42,14 @@ bool bios_exception(CPU *c);       // returns true if an interrupt was taken
 void bios_vblank(void);
 int bios_load_exe(const char *disc_path, uint32_t *entry, uint32_t *sp, uint32_t *gp);
 
-// --------------------------------------------------------------------- hooks
+// ------------------------------------------- game changes (race60.c, view.c, unlock.c)
+extern int frame_interval_override;
+extern bool race_60fps;
+extern float draw_distance, cull_margin;
+extern bool unlock_all;
+void view_raise(uint32_t gp);
+void view_restore(uint32_t gp);
+void primbufs_use(uint32_t gp);
 void unlock_all_vblank(void);
 void unlock_all_card_write(uint32_t src, uint32_t len, bool before);   // around a memory card write
 

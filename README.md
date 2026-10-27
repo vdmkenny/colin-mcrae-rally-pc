@@ -53,6 +53,10 @@ This is an unofficial fan project, not affiliated with Codemasters or Sony.
 - Fast loading: while the game reads data from the CD (with no video, streamed audio or 3D
   scene running) the emulation fast-forwards, so loads take a fraction of the time; the
   game itself sees normal timing. `--no-fast-loading` or `fast_loading = 0` turns it off
+- Unlock all (off by default): `--unlock-all` or `unlock_all = 1` makes every country and
+  its stages, the super-special, the four bonus cars (Escort Mk II, RS200, Delta Integrale,
+  Quattro) and expert difficulty available in the menus. It is not saved: the memory card
+  keeps only what was won, so turning it off locks them again
 - Memory card saves in the standard raw 128 KB `.mcd` format
 - Full audio: SPU with hardware reverb, CD-DA music, XA speech/streams
 - Smooth pacing on any monitor, following the window to another one: on multiples of 60 Hz
@@ -139,6 +143,7 @@ fast-forward, Shift+Esc quit.
 --no-fast-loading load at the original CD speed
 --no-race-60fps   races at the game's own 30 fps
 --draw-distance X draw distance multiplier on stages without fog, 1 to 2 (default 2)
+--unlock-all      every country, stage, car and expert mode (--no-unlock-all: off, default)
 --mute            no audio output
 --cpu N           emulated CPU cost per instruction (default 2; 1 = faster CPU)
 ```
@@ -153,7 +158,9 @@ Settings and memory cards live in the user preferences folder
   and code pointers; branches and delay slots map to gotos, `jal` to C calls, jump tables
   to `switch`. `tools/hooks.txt` attaches native code to specific game functions
   (`runtime/hooks.c`): the 60 fps races hook the main loop, the controller poll, the race and
-  replay updates and the scene renderer; the draw distance and view cone are raised around
+  replay updates, the scene renderer and the shadow drawing; unlock all wraps the frontend's
+  progress loading, merging and copying (and the BIOS card write) so saves keep the player's
+  own unlocks; the draw distance and view cone are raised around
   the scene renderer; the primitive buffers are swapped in the main loop.
 - The game rewrites parts of its own rendering code while it runs: the ambient light colour
   and the screen clipping bounds are patched into instruction immediates, and mirrored views

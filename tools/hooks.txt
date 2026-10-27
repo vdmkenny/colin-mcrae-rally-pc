@@ -9,3 +9,6 @@ game 80079f74 hook_draw_shadows
 game 800966d0 hook_frame_end
 game 800961ec hook_free_primbuf
 game 8009b45c hook_pad_poll
+frontend 8018ee64 hook_load_progress
+frontend 8018ec18 hook_merge_unlocks
+frontend 80187f10 hook_copy_progress

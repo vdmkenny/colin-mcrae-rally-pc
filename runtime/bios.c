@@ -402,6 +402,7 @@ void bios_call(CPU *c, uint32_t table, uint32_t fn) {
         if (!f->open) { v0 = 0xFFFFFFFF; break; }
         MemCard *m = &cards[f->port];
         uint32_t done = 0;
+        if (fn == 0x35) unlock_all_card_write(a1, a2, true);
         while (done < a2 && f->pos < f->size) {
             int blk = mc_block_at(m, f->first_block, f->pos / 8192);
             if (blk < 1) break;
@@ -413,6 +414,7 @@ void bios_call(CPU *c, uint32_t table, uint32_t fn) {
             done += n;
             f->pos += n;
         }
+        if (fn == 0x35) unlock_all_card_write(a1, a2, false);
         if (fn == 0x35) mc_flush(m);
         v0 = done;
         if (f->async) queue_event(0xF4000001, 0x0004);

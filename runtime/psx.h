@@ -42,6 +42,10 @@ bool bios_exception(CPU *c);       // returns true if an interrupt was taken
 void bios_vblank(void);
 int bios_load_exe(const char *disc_path, uint32_t *entry, uint32_t *sp, uint32_t *gp);
 
+// --------------------------------------------------------------------- hooks
+void unlock_all_vblank(void);
+void unlock_all_card_write(uint32_t src, uint32_t len, bool before);   // around a memory card write
+
 // ------------------------------------------------------------------- devices
 void dma_write(uint32_t addr, uint32_t v);
 uint32_t dma_read(uint32_t addr);

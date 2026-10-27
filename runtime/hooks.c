@@ -373,3 +373,88 @@ int hook_frame_end(CPU *c) {
     restore_view(c->r[28]);
     return 0;
 }
+
+// ---------------------------------------------------------------- unlock all
+// The frontend keeps the player's progress in its GAME_INFO block (pointer at 0x80179f48, magic
+// 0x87651234; saved to the memory card whole, and copied into each championship save). Its word
+// at +0x18 holds what is unlocked: bits 0-3 novice countries, 4-7 countries (8 = all), 8 expert
+// mode, 9-11 super-specials (5 = all), 12-15 one bit per bonus car; above that the cheat toggles.
+// With unlock_all the frontend sees everything unlocked, as after the game's own unlock code plus
+// expert mode and the bonus cars, but the player's own progress is what gets loaded, merged and
+// saved: the functions doing that run with it in place, and the memory card is written with it.
+// Nothing is unlocked outside the frontend.
+bool unlock_all = false;
+#define GAME_INFO_PTR 0x80179f48u
+#define GAME_INFO_MAGIC 0x87651234u
+#define UNLOCKS 0x18
+#define ALL_UNLOCKED 0xfb80u   // cars 0xf000, super-specials 5 << 9, expert 0x100, countries 8 << 4
+static uint32_t info_addr;     // the block while unlocks are applied (0: not applied)
+static uint32_t own_unlocks;   // the player's own word
+static uint32_t set_unlocks;   // what was written in its place
+
+static bool in_frontend(void) {
+    const Module *m = module_active();
+    return m && !strcmp(m->name, "frontend");
+}
+
+static uint32_t game_info(void) {
+    uint32_t p = RD32(GAME_INFO_PTR);
+    return (p >> 24) == 0x80 && RD32(p) == GAME_INFO_MAGIC ? p : 0;
+}
+
+static void apply_unlocks(void) {
+    set_unlocks = (own_unlocks & 0xffff000fu) | ALL_UNLOCKED;
+    WR32(info_addr + UNLOCKS, set_unlocks);
+}
+
+// Takes in what the game changed in the word since it was last set.
+static void update_own(uint32_t cur) {
+    own_unlocks = (own_unlocks & ~(cur ^ set_unlocks)) | (cur & (cur ^ set_unlocks));
+}
+
+// Every vblank: unlocks on while the frontend runs, the player's own word back otherwise.
+void unlock_all_vblank(void) {
+    uint32_t p = unlock_all && in_frontend() ? game_info() : 0;
+    if (info_addr && p != info_addr) {
+        if (RD32(info_addr) == GAME_INFO_MAGIC && RD32(info_addr + UNLOCKS) == set_unlocks)
+            WR32(info_addr + UNLOCKS, own_unlocks);
+        info_addr = 0;
+    }
+    if (!p) return;
+    uint32_t cur = RD32(p + UNLOCKS);
+    if (!info_addr) own_unlocks = cur;
+    else update_own(cur);
+    info_addr = p;
+    apply_unlocks();
+}
+
+// Runs the hooked function with the player's own word in place; what it leaves there is theirs.
+static int with_own_unlocks(CPU *c, uint32_t fn, bool *busy) {
+    if (!info_addr || *busy || game_info() != info_addr) return 0;
+    *busy = true;
+    update_own(RD32(info_addr + UNLOCKS));
+    WR32(info_addr + UNLOCKS, own_unlocks);
+    dispatch_call(c, fn);
+    own_unlocks = RD32(info_addr + UNLOCKS);
+    apply_unlocks();
+    *busy = false;
+    return 1;
+}
+
+// frontend: loads GAME_INFO from the memory card, keeping unlocks already in memory.
+int hook_load_progress(CPU *c) { static bool busy; return with_own_unlocks(c, 0x8018ee64u, &busy); }
+// frontend: merges the unlocks recorded in the championship saves.
+int hook_merge_unlocks(CPU *c) { static bool busy; return with_own_unlocks(c, 0x8018ec18u, &busy); }
+// frontend: copies the progress into the championship being started (and so into its save).
+int hook_copy_progress(CPU *c) { static bool busy; return with_own_unlocks(c, 0x80187f10u, &busy); }
+// BIOS write() to the memory card (the game's card writes complete a few frames after it asks
+// for them): GAME_INFO goes out with the player's own word.
+void unlock_all_card_write(uint32_t src, uint32_t len, bool before) {
+    if (!info_addr || info_addr + UNLOCKS < src || info_addr + UNLOCKS + 4 > src + len) return;
+    if (before) {
+        update_own(RD32(info_addr + UNLOCKS));
+        WR32(info_addr + UNLOCKS, own_unlocks);
+    } else {
+        apply_unlocks();
+    }
+}

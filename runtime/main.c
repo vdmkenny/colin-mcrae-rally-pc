@@ -327,6 +327,7 @@ static void handle_events(void) {
 extern int frame_interval_override;
 extern bool race_60fps;
 extern float draw_distance, cull_margin;
+extern bool unlock_all;
 
 // ----------------------------------------------------------------- frames
 // With vsync, images are presented to the refresh of the monitor the window is on. When its
@@ -426,6 +427,7 @@ void host_frame(void) {
     if (!fast() || (frame_count % 8) == 0) present_vblank();
     else render_vblank();
     push_audio();
+    unlock_all_vblank();
     if (opts.shot_every && frame_count >= opts.shot_from && frame_count % opts.shot_every == 0) save_screenshot();
     {
         // testing: CMR_ANALOG_AT=<frame> presses the DualShock ANALOG button on port 1
@@ -600,6 +602,7 @@ static void apply_setting(const char *k, const char *v) {
     else if (!strcmp(k, "fast_loading")) fast_loading = n;
     else if (!strcmp(k, "race_60fps")) race_60fps = n;
     else if (!strcmp(k, "draw_distance")) draw_distance = (float)atof(v);
+    else if (!strcmp(k, "unlock_all")) unlock_all = n;
     else if (!strcmp(k, "controller")) {
         for (int c = 0; c < 4; c++) if (!strcmp(v, controller_names[c])) controller_type = c;
     }
@@ -634,8 +637,8 @@ static void save_settings(void) {
     fprintf(f, "settings_version = %d\nmsaa = %d\n", SETTINGS_VERSION, render_cfg.msaa);
     fprintf(f, "fullscreen = %d\nwindow = %d\nscale = %d\nhires = %d\nfilter = %d\nwidescreen = %d\n",
             opts.fullscreen, opts.scale, render_cfg.scale, render_cfg.hw, render_cfg.filter, render_cfg.widescreen);
-    fprintf(f, "rumble = %d\nfast_loading = %d\nrace_60fps = %d\ndraw_distance = %.2f\n", rumble_enabled, fast_loading,
-            race_60fps, draw_distance);
+    fprintf(f, "rumble = %d\nfast_loading = %d\nrace_60fps = %d\ndraw_distance = %.2f\nunlock_all = %d\n", rumble_enabled,
+            fast_loading, race_60fps, draw_distance, unlock_all);
     fprintf(f, "pgxp = %d\nvsync = %d\ndither = %d\ncontroller = %s\ncpu = %u\n", pgxp_enabled, vsync,
             gpu_dither_enabled, controller_names[controller_type], cycles_per_insn);
     fclose(f);
@@ -652,6 +655,8 @@ static void usage(void) {
             "  --no-fast-loading   load at the original CD speed\n"
             "  --no-race-60fps     races at the game's own 30 fps (default: 60)\n"
             "  --draw-distance X   draw distance multiplier on clear stages, 1-2 (default 2)\n"
+            "  --unlock-all        every country, stage, car and expert mode available (not saved)\n"
+            "  --no-unlock-all     only what the player has unlocked (default)\n"
             "  --mute              no audio output\n"
             "  --cpu N             CPU cycles per instruction (default 2; 1 = faster CPU)\n"
             "  --no-dither         disable PlayStation dithering (toggle with F3)\n"
@@ -694,6 +699,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--race-60fps")) race_60fps = true;
         else if (!strcmp(argv[i], "--no-race-60fps")) race_60fps = false;
         else if (!strcmp(argv[i], "--draw-distance") && i + 1 < argc) draw_distance = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--unlock-all")) unlock_all = true;
+        else if (!strcmp(argv[i], "--no-unlock-all")) unlock_all = false;
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) {
             wav_out = fopen(argv[++i], "wb");
             if (wav_out) { wav_header(); atexit(close_wav); }

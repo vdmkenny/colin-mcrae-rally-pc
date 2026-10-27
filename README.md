@@ -189,7 +189,7 @@ sharing:
   the car menu; wheels, driver's view and engine come from the base car. `--paint RRGGBB`
   repaints it and `--rim N` resizes the base car's rims to N inches. The example, from the
   Simulation disc:
-  `python3 tools/gt2car.py GRANTURISMO2.BIN s2v4n build/cars/vivio --bhp 63 --mass 750
+  `python3 tools/gt2car.py GT2.bin s2v4n build/cars/vivio --bhp 63 --mass 750
   --wheelbase 2310 --short-name "VIVIO RX-RA" --paint EBA92E --rim 13`
 - `tools/carsound.py` makes an engine sound from a disc car's, optionally revving higher,
   supercharged and without the turbo's dump valve: `python3 tools/carsound.py
@@ -240,7 +240,8 @@ before driving it.
   GTE can only clamp (too near or behind the camera) keep their true depth, so the renderer
   draws those polygons in 3D and the GPU cuts them at the camera plane; the game's own
   backface test (NCLIP) then uses the true facing.
-- `ghidra/` holds the headless Ghidra scripts used to produce the function lists.
+- `ghidra/` holds the headless Ghidra scripts used to produce the function lists
+  (`GHIDRA_HOME=/path/to/ghidra ghidra/run.sh`, with JDK 21 on the path or in `JAVA_HOME`).
 
 ## Status
 

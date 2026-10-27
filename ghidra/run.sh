@@ -3,10 +3,10 @@
 # and exports function boundaries plus decompiled C into ghidra/out/.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
-ghidra_home=/opt/ghidra_12.1.3_PUBLIC
-export JAVA_HOME=/opt/jdk-21.0.12.1+1/Contents/Home
-export PATH="$JAVA_HOME/bin:$PATH"
-headless="$ghidra_home/support/analyzeHeadless"
+# GHIDRA_HOME is a Ghidra 12 install; JAVA_HOME, if set, the JDK 21 it runs on.
+: "${GHIDRA_HOME:?set GHIDRA_HOME to your Ghidra install}"
+[ -n "${JAVA_HOME:-}" ] && export PATH="$JAVA_HOME/bin:$PATH"
+headless="$GHIDRA_HOME/support/analyzeHeadless"
 out="$root/ghidra/out"
 project="$root/ghidra/project"
 mkdir -p "$project" "$out"

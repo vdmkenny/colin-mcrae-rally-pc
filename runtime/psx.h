@@ -53,6 +53,24 @@ void primbufs_use(uint32_t gp);
 void unlock_all_vblank(void);
 void unlock_all_card_write(uint32_t src, uint32_t len, bool before);   // around a memory card write
 
+// ------------------------------------------------------------------ extra cars (cars.c)
+#define NUM_DISC_CARS 12   // the last, a Renault Megane, never shipped
+#define MAX_EXTRA_CARS 32
+typedef struct {
+    char name[32], short_name[16];
+    int base;                       // disc car used for handling, sounds and records
+    int bhp, wheelbase, drive;      // for the car menu; drive 0 4WD, 1 FWD, 2 RWD
+    int mass;                       // kg, or 0 for the game's (1120 for every car)
+    uint32_t lba[7], size[7];       // files served from memory (lba 0: from the base car)
+    const uint8_t *data[7];
+    uint32_t showroom;              // its showroom object in the frontend (0: none)
+} ExtraCar;
+extern ExtraCar extra_cars[MAX_EXTRA_CARS];
+extern int num_extra_cars;
+extern int car_extra[2];   // extra car picked by each player, or -1
+extern bool extra_cars_enabled;
+void cars_init(void);
+
 // ------------------------------------------------------------------- devices
 void dma_write(uint32_t addr, uint32_t v);
 uint32_t dma_read(uint32_t addr);
@@ -84,6 +102,7 @@ void cdrom_dma(uint32_t addr, uint32_t words);
 void cdrom_audio(int16_t *buf, int frames);   // CD-DA / XA samples at 44.1 kHz, stereo
 int cdrom_read_sector_raw(uint32_t lba, uint8_t *out2352);
 int cdrom_find_file(const char *path, uint32_t *lba, uint32_t *size);
+uint32_t cdrom_add_file(const uint8_t *data, uint32_t size);   // serves data at the returned LBA
 void cdrom_activity(int *data, int *xa, int *cdda);   // sectors delivered since the last call
 
 void spu_init(void);

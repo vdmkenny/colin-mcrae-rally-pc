@@ -13,3 +13,16 @@ game 8009b45c hook_pad_poll
 frontend 8018ee64 hook_load_progress
 frontend 8018ec18 hook_merge_unlocks
 frontend 80187f10 hook_copy_progress
+game 80061764 hook_car_path
+game 8009eae4 hook_find_file
+frontend 801921bc hook_car_menu_init
+frontend 8019c298 hook_menu_input
+frontend 80196894 hook_car_allowed
+frontend 801969b8 hook_car_row_p1
+frontend 80196bf8 hook_car_row_p2
+frontend 80192d98 hook_car_commit
+game 80026838 hook_car_physics
+frontend 80196e10 hook_gear_row_p1
+frontend 8019701c hook_gear_row_p2
+frontend 80195da0 hook_showrooms
+frontend 80186c78 hook_hide_showrooms

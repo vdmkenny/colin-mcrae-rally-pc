@@ -18,7 +18,7 @@ include(${GEN_DIR}/sources.cmake)
 set(RUNTIME_SOURCES
   runtime/main.c runtime/core.c runtime/mem.c runtime/bios.c runtime/timers.c
   runtime/gpu.c runtime/gte.c runtime/spu.c runtime/cdrom.c runtime/mdec.c runtime/sio.c
-  runtime/render_gpu.c runtime/pgxp.c runtime/race60.c runtime/view.c runtime/unlock.c)
+  runtime/render_gpu.c runtime/pgxp.c runtime/race60.c runtime/view.c runtime/unlock.c runtime/cars.c)
 
 # Recompiled game code: large, machine-generated functions.
 add_library(game_code STATIC ${GENERATED_SOURCES})
@@ -58,4 +58,6 @@ find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
   add_test(NAME regress COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/regress.py $<TARGET_FILE:cmrally> check)
   set_tests_properties(regress PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+  add_test(NAME car-files COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/cmrcar_test.py)
+  set_tests_properties(car-files PROPERTIES SKIP_RETURN_CODE 77)
 endif()

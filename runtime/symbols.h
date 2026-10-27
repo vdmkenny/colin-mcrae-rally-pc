@@ -26,7 +26,38 @@
 #define STATE_RACE      5u
 #define STATE_REPLAY    8u   // stage results and the attract demo
 
+#define BODY_MASS       0x48          // car physics body: mass (kg, 16.16), then its reciprocal
+#define BODY_SLOT       0x624
+#define BODY_CAR        0x625
+#define GAME_RACE_INFO  0x800c6db8u   // -> the frontend's choices: 0x60 bytes per player from +0x18
+#define RI_CAR          0x76          // low 4 bits: the player's car
+
 // --------------------------------------------------------------- FRONTEND.EXE
 #define GAME_INFO_PTR   0x80179f48u   // the player's progress, saved to the memory card
 #define GAME_INFO_MAGIC 0x87651234u
 #define GI_UNLOCKS      0x18
+#define GI_CAR_P1       0x7c          // bits 16-19: player 1's car
+#define GI_CAR_P2       0xdc          // bits 16-19: player 2's car
+#define GI_PLAYERS      0xf0          // bits 16-17: 0 for one player
+
+#define CAR_NAMES       0x801ccd90u   // 12 string pointers per table
+#define CAR_SHORT_NAMES 0x801ccdc0u
+#define CAR_SPECS       0x801cd3e0u   // per car: bhp, wheelbase (mm), drive (0 4WD, 1 FWD, 2 RWD)
+#define CAR_MODELS      0x80132118u   // per car: showroom object, model data
+#define SHOWROOMS_MADE  0x801d07ccu   // byte: the car objects exist
+#define SHOWROOM_SCENE  0x801d087cu   // -> the scene car objects are made in
+#define SHOWROOM_POS    0x801cd3d4u
+#define SHOWROOM_ROT    0x801d07c4u
+#define FN_NEW_OBJECT   0x801990bcu   // (scene) -> object
+#define FN_LOAD_MODEL   0x801ac4bcu   // (model data, object, 0)
+#define FN_PLACE_OBJECT 0x80198cd0u   // (object, position, rotation)
+#define FN_FIND_NODE    0x80199e60u   // (object, id) -> node
+#define NODE_VISIBLE    0xb5          // object: per-viewport visibility mask
+#define CAR_MENU_CARS   0x801cd470u   // byte per car menu entry (12): the car it shows
+#define CAR_MENU_COUNT  0x801d07d8u
+#define CAR_MENU_P2     0x801e3708u   // player 2's car menu; player 1's is on the car screen
+#define MENU_ITEMS      0x40          // menu: item count, current item, items of 0x34 bytes from 0x4c
+#define MENU_ITEM       0x44
+#define ITEM_ID         0x0c
+#define ITEM_COUNT      0x18
+#define ITEM_SEL        0x1c

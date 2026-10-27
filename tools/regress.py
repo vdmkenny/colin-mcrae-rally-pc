@@ -18,7 +18,7 @@ import tempfile
 
 RACE = ("1100-1105:8;1600-1605:8;2000-2005:4000;2400-2405:4000;3200-3205:4000;3500-3505:4000;"
         "3800-3805:4000;4100-4105:4000;4300-5400:4000")
-COMMON = ["--mute", "--hidden", "--turbo", "--scale", "1", "--controller", "digital", "--exit-after", "5000",
+COMMON = ["--mute", "--hidden", "--turbo", "--no-extra-cars", "--scale", "1", "--controller", "digital", "--exit-after", "5000",
           "--script", RACE]
 SHOTS = {"race": [], "race-unlock": ["--unlock-all"]}
 TICKS = {"ticks-30": ["--no-race-60fps"], "ticks-60": ["--race-60fps"]}

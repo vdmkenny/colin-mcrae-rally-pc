@@ -75,7 +75,39 @@ static int track_index_for(uint32_t lba) {
     return 0;
 }
 
+// Files that are not on the disc (extra cars) get sectors past its end and are read from memory.
+#define EXTRA_LBA 200000u
+typedef struct { uint32_t lba, size; const uint8_t *data; } ExtraFile;
+static ExtraFile extra_files[256];
+static int num_extra;
+static uint32_t extra_next = EXTRA_LBA;
+
+uint32_t cdrom_add_file(const uint8_t *data, uint32_t size) {
+    if (num_extra == (int)(sizeof extra_files / sizeof *extra_files)) return 0;
+    ExtraFile *e = &extra_files[num_extra++];
+    e->lba = extra_next; e->size = size; e->data = data;
+    extra_next += (size + 2047) / 2048 + 1;
+    return e->lba;
+}
+
+static void extra_sector(uint32_t lba, uint8_t *out) {
+    memset(out, 0, 2352);
+    memset(out + 1, 0xff, 10);
+    uint32_t a = lba + 150;
+    out[12] = (uint8_t)bcd(a / 4500); out[13] = (uint8_t)bcd(a / 75 % 60); out[14] = (uint8_t)bcd(a % 75);
+    out[15] = 2;
+    out[18] = out[22] = 0x08;   // Form 1 data
+    for (int i = 0; i < num_extra; i++) {
+        const ExtraFile *e = &extra_files[i];
+        if (lba < e->lba || lba >= e->lba + (e->size + 2047) / 2048) continue;
+        uint32_t off = (lba - e->lba) * 2048;
+        memcpy(out + 24, e->data + off, e->size - off < 2048 ? e->size - off : 2048);
+        if (lba + 1 == e->lba + (e->size + 2047) / 2048) out[18] = out[22] = 0x89;   // end of file
+    }
+}
+
 int cdrom_read_sector_raw(uint32_t lba, uint8_t *out) {
+    if (lba >= EXTRA_LBA) { extra_sector(lba, out); return 0; }
     Track *t = track_for(lba);
     if (!t || lba >= t->file_lba + t->sectors) { memset(out, 0, 2352); return -1; }
     fseek(t->f, (long)(lba - t->file_lba) * 2352, SEEK_SET);

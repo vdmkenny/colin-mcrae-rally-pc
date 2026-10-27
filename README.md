@@ -59,6 +59,9 @@ This is an unofficial fan project, not affiliated with Codemasters or Sony.
   its stages, the super-special, the four bonus cars (Escort Mk II, RS200, Delta Integrale,
   Quattro) and expert difficulty available in the menus. It is not saved: the memory card
   keeps only what was won, so turning it off locks them again
+- Extra cars from car folders: each folder in `cars/` (beside the program or in the settings
+  folder) adds a car to the end of the car menu; left and right on it step through them. See
+  [Extra cars](#extra-cars)
 - Memory card saves in the standard raw 128 KB `.mcd` format
 - Full audio: SPU with hardware reverb, CD-DA music, XA speech/streams
 - Smooth pacing on any monitor, following the window to another one: on multiples of 60 Hz
@@ -153,6 +156,44 @@ fast-forward, Shift+Esc quit.
 Settings and memory cards live in the user preferences folder
 (`~/Library/Application Support/cmrally/Colin McRae Rally/` on macOS).
 
+## Extra cars
+
+A car folder holds `car.ini` and any of the files the disc has for each car (`DAY.BFX`,
+`NIGHT.BFX`, `MEDIUM.BFX`, `DAYTIM.BFX`, `NIGHTTIM.BFX`, `MEDIUM.TIM`, `SOUNDS.BFX`; their format
+is in `docs/car-files.md`):
+
+```
+name = SUBARU VIVIO RX-RA     # car menu name
+short_name = VIVIO RX-RA
+base = SUBARU                 # disc car for handling, sounds and records
+bhp = 63                      # shown in the car menu
+wheelbase = 2310
+drive = 4WD                   # 4WD, FWD or RWD, shown in the car menu
+mass = 750                    # kg (optional; every disc car is 1120)
+```
+
+Files the folder lacks come from the base car, whose class the mode's rules (kit cars, bonus
+cars) also apply to. The car menu shows the car's `MEDIUM` model. The frontend saves the base
+car, so a saved championship continues with it. A car keeps its base's collision box, driver's
+view (steering wheel, arms, wipers) and engine sound unless it has its own. `--no-extra-cars`
+ignores the folders. Two tools make car folders from your own discs; the results are not for
+sharing:
+
+- `tools/gt2car.py` converts a Gran Turismo 2 car (NTSC-U; the Simulation disc has every car).
+  `--list vivio` finds its id. The body is GT2's most detailed model split into the game's
+  damage panels, its night model for night stages and the middle one for split screen and
+  the car menu; wheels, driver's view and engine come from the base car. `--paint RRGGBB`
+  repaints it and `--rim N` resizes the base car's rims to N inches. The example, from the
+  Simulation disc:
+  `python3 tools/gt2car.py GRANTURISMO2.BIN s2v4n build/cars/vivio --bhp 63 --mass 750
+  --wheelbase 2310 --short-name "VIVIO RX-RA" --paint EBA92E --rim 13`
+- `tools/carsound.py` makes an engine sound from a disc car's, optionally revving higher and
+  supercharged: `python3 tools/carsound.py "Colin McRae Rally.cue" VWGOLF
+  build/cars/vivio/SOUNDS.BFX --pitch 1.19 --whine 0.2`
+
+`tools/cmrexport.py` renders a car folder (OBJ export, views, its VRAM area) to check a car
+before driving it.
+
 ## How it works
 
 - `tools/recomp.py` translates each executable (boot loader, frontend, game, rally school)
@@ -164,7 +205,10 @@ Settings and memory cards live in the user preferences folder
   drawing; the draw distance and view cone are raised around the scene renderer and the
   primitive buffers swapped in the main loop (`runtime/view.c`); unlock all (`runtime/unlock.c`)
   wraps the frontend's progress loading, merging and copying (and the BIOS card write) so saves
-  keep the player's own unlocks. Game addresses are in `runtime/symbols.h`.
+  keep the player's own unlocks. Extra cars (`runtime/cars.c`) hook the game's file lookup,
+  serving car folder files at CD sectors past the end of the disc, the car folder path, the
+  physics setup, and the frontend's car menu, rows and showroom objects. Game addresses are in
+  `runtime/symbols.h`.
 - The recompiler's warnings (data decoded as code, jumps through registers) are checked against
   a reviewed list in `tools/warnings/`; generation fails on a new one until it is looked at and
   accepted with `--accept-warnings`.
@@ -208,7 +252,8 @@ through, so later stages and end-of-rally screens are less tested.
 Regression test (needs your disc, so it runs locally): record references once on a good build
 with `python3 tools/regress.py build/cmrally record`, then `ctest --test-dir build` compares
 race screenshots, with and without unlock-all, and checks that the car's path is identical at
-30 and 60 fps.
+30 and 60 fps. It also checks that `tools/cmrcar.py` reads and writes every car file on the disc
+byte for byte.
 
 Development aids: `--log N`, `--turbo`, `--hidden`, `--exit-after N`, `--shot-every N --shot-dir D`,
 `--script "from-to:buttons[:twist[:throttle]];..."` (`--script2` for port 2), `--wav file.wav`,

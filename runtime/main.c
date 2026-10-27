@@ -650,6 +650,7 @@ static void usage(void) {
             "  --draw-distance X   draw distance multiplier on clear stages, 1-2 (default 2)\n"
             "  --unlock-all        every country, stage, car and expert mode available (not saved)\n"
             "  --no-unlock-all     only what the player has unlocked (default)\n"
+            "  --no-extra-cars     ignore the car folders in cars/\n"
             "  --mute              no audio output\n"
             "  --cpu N             CPU cycles per instruction (default 2; 1 = faster CPU)\n"
             "  --no-dither         disable PlayStation dithering (toggle with F3)\n"
@@ -694,6 +695,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--draw-distance") && i + 1 < argc) draw_distance = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--unlock-all")) unlock_all = true;
         else if (!strcmp(argv[i], "--no-unlock-all")) unlock_all = false;
+        else if (!strcmp(argv[i], "--no-extra-cars")) extra_cars_enabled = false;
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) {
             wav_out = fopen(argv[++i], "wb");
             if (wav_out) { wav_header(); atexit(close_wav); }
@@ -757,6 +759,7 @@ int main(int argc, char **argv) {
     memset(psx_ram, 0, sizeof psx_ram);
     sched_init();
     bios_init();
+    if (extra_cars_enabled) cars_init();
     timers_init();
     gpu_init();
     gte_init();

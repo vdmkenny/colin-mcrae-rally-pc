@@ -8,6 +8,7 @@ static bool rx_full, busy, ack_level, irq_flag;
 static uint8_t tx_pending;
 
 typedef struct {
+    bool negcon;            // Namco NeGcon: twist steering, analog I/II/L
     bool analog;            // reports as 0x73 instead of 0x41
     bool config;            // in DualShock configuration mode
     uint8_t cmd;
@@ -43,6 +44,27 @@ static void build_reply(Pad *p, int port) {
     }
     p->reply[0] = b & 0xFF;
     p->reply[1] = b >> 8;
+    if (p->negcon) {
+        // NeGcon: Start/d-pad as usual, R = R1, A = Circle, B = Triangle; I/II/L are analog
+        uint16_t nb = 0xFFFF;
+        uint16_t pressed = s->buttons;
+        if (pressed & PAD_START) nb &= ~(1u << 3);
+        if (pressed & PAD_UP) nb &= ~(1u << 4);
+        if (pressed & PAD_RIGHT) nb &= ~(1u << 5);
+        if (pressed & PAD_DOWN) nb &= ~(1u << 6);
+        if (pressed & PAD_LEFT) nb &= ~(1u << 7);
+        if (pressed & PAD_R1) nb &= ~(1u << 11);
+        if (pressed & PAD_TRIANGLE) nb &= ~(1u << 12);
+        if (pressed & PAD_CIRCLE) nb &= ~(1u << 13);
+        p->reply[0] = nb & 0xFF;
+        p->reply[1] = nb >> 8;
+        p->reply[2] = s->lx;                                   // twist
+        p->reply[3] = s->negcon_i;                             // I
+        p->reply[4] = s->negcon_ii;                            // II
+        p->reply[5] = (pressed & PAD_L1) ? 0xFF : s->negcon_l; // L
+        p->reply_len = 6;
+        return;
+    }
     if (p->analog) {
         p->reply[2] = s->rx; p->reply[3] = s->ry; p->reply[4] = s->lx; p->reply[5] = s->ly;
     } else {
@@ -57,10 +79,11 @@ static uint8_t pad_exchange(int port, uint8_t tx, bool *ack) {
     if (seq == 1) {
         p->cmd = tx;
         p->pos = 0;
-        bool valid = tx == 0x42 || tx == 0x43 || (p->config && tx >= 0x40 && tx <= 0x4F);
+        bool valid = tx == 0x42 || (!p->negcon && (tx == 0x43 || (p->config && tx >= 0x40 && tx <= 0x4F)));
         if (!valid) { *ack = false; return 0xFF; }
         build_reply(p, port);
         if (p->config) return 0xF3;
+        if (p->negcon) return 0x23;
         return p->analog ? 0x73 : 0x41;
     }
     if (seq == 2) return 0x5A;
@@ -179,3 +202,5 @@ void sio_write(uint32_t addr, uint32_t v, int size) {
 }
 
 void sio_set_analog(bool on) { padsio[0].analog = padsio[1].analog = on; }
+
+void sio_set_negcon(bool on) { padsio[0].negcon = padsio[1].negcon = on; }

@@ -96,6 +96,7 @@ void sio_write(uint32_t addr, uint32_t v, int size);
 typedef struct {
     uint16_t buttons;          // PlayStation layout, active high (see PAD_* below)
     uint8_t lx, ly, rx, ry;    // analog sticks, 0x80 = centre
+    uint8_t negcon_i, negcon_ii, negcon_l;   // NeGcon analog buttons, 0 = released
     bool connected;
 } PadState;
 enum {

@@ -8,6 +8,12 @@
 
 PadState pads[2];
 bool pad_analog_mode = false;
+void sio_set_analog(bool on);
+void sio_set_negcon(bool on);
+static bool negcon_mode;
+enum { CTRL_AUTO, CTRL_DIGITAL, CTRL_DUALSHOCK, CTRL_NEGCON };
+static int controller_type = CTRL_AUTO;
+static const char *controller_names[] = {"auto", "digital", "dualshock", "negcon"};
 char save_dir[1024] = ".";
 
 extern bool gpu_dither_enabled;
@@ -38,15 +44,20 @@ static struct {
 
 static int frame_count;
 
-static uint16_t script_buttons(int frame) {
-    // Format: "<start>-<end>:<hex buttons>;..." e.g. "300-310:8;600-605:4000"
+static uint16_t script_buttons(int frame, PadState *pad) {
+    // Format: "<start>-<end>:<hex buttons>[:<lx hex>]...;" e.g. "300-310:8;600-605:4000:20"
     if (!opts.script) return 0;
     uint16_t b = 0;
     const char *p = opts.script;
     while (*p) {
         int a = 0, e = 0;
-        unsigned m = 0;
-        if (sscanf(p, "%d-%d:%x", &a, &e, &m) == 3 && frame >= a && frame <= e) b |= (uint16_t)m;
+        unsigned m = 0, lx = 0x80, ni = 0;
+        int n = sscanf(p, "%d-%d:%x:%x:%x", &a, &e, &m, &lx, &ni);
+        if (n >= 3 && frame >= a && frame <= e) {
+            b |= (uint16_t)m;
+            if (n >= 4) pad->lx = (uint8_t)lx;
+            if (n >= 5) pad->negcon_i = (uint8_t)ni;
+        }
         p = strchr(p, ';');
         if (!p) break;
         p++;
@@ -99,6 +110,18 @@ static void poll_keyboard(PadState *p) {
 
 static uint8_t axis8(Sint16 v) { return (uint8_t)((v + 32768) >> 8); }
 
+// Stick axis to a NeGcon twist value with a small dead zone.
+static uint8_t twist8(Sint16 v) {
+    const int dead = 2500;
+    int x = v;
+    if (x > -dead && x < dead) return 0x80;
+    x = x > 0 ? (x - dead) * 32767 / (32767 - dead) : (x + dead) * 32768 / (32768 - dead);
+    int t = 0x80 + x * 127 / 32767;
+    return (uint8_t)(t < 0 ? 0 : t > 255 ? 255 : t);
+}
+
+static uint8_t trigger8(Sint16 v) { return v <= 0 ? 0 : (uint8_t)(v * 255 / 32767); }
+
 static void poll_gamepad(PadState *p) {
     if (!gamepad) return;
     static const struct { SDL_GamepadButton b; uint16_t m; } map[] = {
@@ -119,6 +142,19 @@ static void poll_gamepad(PadState *p) {
     p->lx = axis8(lx); p->ly = axis8(ly);
     p->rx = axis8(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTX));
     p->ry = axis8(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTY));
+    if (negcon_mode) {
+        // NeGcon: twist from the left stick, I/II (throttle/brake) from the triggers or
+        // the South/West buttons, A/B from North/East, L/R from the shoulders
+        p->lx = twist8(lx);
+        uint8_t ti = trigger8(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
+        uint8_t tii = trigger8(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
+        if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_SOUTH)) ti = 255;
+        if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_WEST)) tii = 255;
+        if (ti > p->negcon_i) p->negcon_i = ti;
+        if (tii > p->negcon_ii) p->negcon_ii = tii;
+        p->buttons &= ~(PAD_L2 | PAD_R2);
+        return;
+    }
     if (!pad_analog_mode) {
         // digital pad: the left stick doubles as the d-pad
         const int dead = 14000;
@@ -189,13 +225,20 @@ static void handle_events(void) {
     PadState *p = &pads[0];
     p->buttons = 0;
     p->lx = p->ly = p->rx = p->ry = 0x80;
+    p->negcon_i = p->negcon_ii = p->negcon_l = 0;
     p->connected = true;
     poll_keyboard(p);
+    p->buttons |= script_buttons(frame_count, p);
+    if (negcon_mode) {
+        // keyboard on a NeGcon: arrows twist fully, X/Z are I/II
+        if (p->buttons & PAD_LEFT) p->lx = 0x00;
+        if (p->buttons & PAD_RIGHT) p->lx = 0xFF;
+        if (p->buttons & PAD_CROSS) p->negcon_i = 255;
+        if (p->buttons & PAD_SQUARE) p->negcon_ii = 255;
+    }
     poll_gamepad(p);
-    p->buttons |= script_buttons(frame_count);
 }
 
-void sio_set_analog(bool on);
 extern int frame_interval_override;
 
 // ----------------------------------------------------------------- frames
@@ -329,7 +372,9 @@ static void apply_setting(const char *k, const char *v) {
     else if (!strcmp(k, "interpolation")) render_cfg.interpolate = n;
     else if (!strcmp(k, "vsync")) vsync = n;
     else if (!strcmp(k, "dither")) gpu_dither_enabled = n;
-    else if (!strcmp(k, "analog")) pad_analog_mode = n;
+    else if (!strcmp(k, "controller")) {
+        for (int c = 0; c < 4; c++) if (!strcmp(v, controller_names[c])) controller_type = c;
+    }
     else if (!strcmp(k, "cpu")) cycles_per_insn = n > 0 ? (uint32_t)n : 2;
 }
 
@@ -357,8 +402,8 @@ static void save_settings(void) {
     fprintf(f, "fullscreen = %d\nwindow = %d\nscale = %d\nhires = %d\nfilter = %d\nwidescreen = %d\n",
             opts.fullscreen, opts.scale, render_cfg.scale, render_cfg.hw, render_cfg.filter, render_cfg.widescreen);
     fprintf(f, "interpolation = %d\n", render_cfg.interpolate);
-    fprintf(f, "pgxp = %d\nvsync = %d\ndither = %d\nanalog = %d\ncpu = %u\n", pgxp_enabled, vsync,
-            gpu_dither_enabled, pad_analog_mode, cycles_per_insn);
+    fprintf(f, "pgxp = %d\nvsync = %d\ndither = %d\ncontroller = %s\ncpu = %u\n", pgxp_enabled, vsync,
+            gpu_dither_enabled, controller_names[controller_type], cycles_per_insn);
     fclose(f);
 }
 
@@ -367,7 +412,8 @@ static void usage(void) {
             "usage: cmrally [options] [game.cue]\n"
             "  --fullscreen        start fullscreen (toggle with F11 / Alt+Enter)\n"
             "  --window N          window size as a multiple of 320x240 (default 3)\n"
-            "  --analog            present a DualShock in analog mode\n"
+            "  --controller TYPE   auto (NeGcon with a gamepad, else digital), negcon, digital,\n"
+            "                      dualshock\n"
             "  --cpu N             CPU cycles per instruction (default 2; 1 = faster CPU)\n"
             "  --no-dither         disable PlayStation dithering (toggle with F3)\n"
             "  --software          show the original 1x software renderer (toggle with F4)\n"
@@ -403,7 +449,10 @@ int main(int argc, char **argv) {
             wav_out = fopen(argv[++i], "wb");
             if (wav_out) { wav_header(); atexit(close_wav); }
         }
-        else if (!strcmp(argv[i], "--analog")) pad_analog_mode = true;
+        else if (!strcmp(argv[i], "--controller") && i + 1 < argc) {
+            const char *t = argv[++i];
+            for (int k = 0; k < 4; k++) if (!strcmp(t, controller_names[k])) controller_type = k;
+        }
         else if (!strcmp(argv[i], "--cpu") && i + 1 < argc) cycles_per_insn = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-dither")) gpu_dither_enabled = false;
         else if (!strcmp(argv[i], "--log") && i + 1 < argc) log_level = atoi(argv[++i]);
@@ -455,7 +504,14 @@ int main(int argc, char **argv) {
     if (audio) SDL_ResumeAudioStreamDevice(audio);
     else LOG("audio: %s\n", SDL_GetError());
     open_first_gamepad();
+    // The game supports Namco's NeGcon (analog steering and throttle) but not analog sticks
+    // on a DualShock, so a gamepad is presented as a NeGcon unless configured otherwise.
+    int ctype = controller_type == CTRL_AUTO ? (gamepad ? CTRL_NEGCON : CTRL_DIGITAL) : controller_type;
+    negcon_mode = ctype == CTRL_NEGCON;
+    pad_analog_mode = ctype == CTRL_DUALSHOCK;
     sio_set_analog(pad_analog_mode);
+    sio_set_negcon(negcon_mode);
+    LOG("[input] controller: %s\n", controller_names[ctype]);
 
     memset(psx_ram, 0, sizeof psx_ram);
     sched_init();

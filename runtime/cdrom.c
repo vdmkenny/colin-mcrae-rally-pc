@@ -309,6 +309,14 @@ static void cdda_sector(const uint8_t *sec) {
 // --------------------------------------------------------------- read engine
 static uint32_t sector_cycles(void) { return (mode & 0x80) ? PSX_CLOCK / 150 : PSX_CLOCK / 75; }
 
+// Sectors delivered since the last call, by kind (for detecting loading).
+static int act_data, act_xa, act_cdda;
+
+void cdrom_activity(int *data, int *xa, int *cdda) {
+    *data = act_data; *xa = act_xa; *cdda = act_cdda;
+    act_data = act_xa = act_cdda = 0;
+}
+
 static void read_tick(void);
 
 static void start_read(uint32_t seek_delay) {
@@ -340,10 +348,11 @@ static void read_tick(void) {
         bool is_audio_xa = (sector[15] == 2) && (submode & 0x04);
         if ((mode & 0x40) && is_audio_xa) {
             bool pass = !(mode & 0x08) || (sector[16] == filter_file && sector[17] == filter_chan);
-            if (pass) xa_sector(sector);
+            if (pass) { xa_sector(sector); act_xa++; }
             if (submode & 0x80) { /* end of file */ }
         } else if (!((mode & 0x08) && is_audio_xa)) {
             sector_ready = true;
+            act_data++;
             irq_stat(1, 0);
         }
         sched_at(EV_CDROM_READ, cpu.cycles + sector_cycles(), read_tick);
@@ -360,6 +369,7 @@ static void read_tick(void) {
         }
         cdrom_read_sector_raw(cur_lba, buf);
         cdda_sector(buf);
+        act_cdda++;
         if ((mode & 0x04) && (++report_counter % 10) == 0 && !(irq_flag & 7) && !qlen) {
             uint8_t r[8];
             Track *t = &tracks[ti];

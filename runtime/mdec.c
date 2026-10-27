@@ -201,7 +201,10 @@ uint32_t mdec_read(int reg) {
     return s;
 }
 
+int mdec_activity;   // words fed to the decoder (video playing)
+
 void mdec_dma_in(uint32_t addr, uint32_t words) {
+    mdec_activity += (int)words;
     for (uint32_t i = 0; i < words; i++) {
         uint32_t w;
         memcpy(&w, psx_ram + ((addr + i * 4) & 0x1FFFFC), 4);

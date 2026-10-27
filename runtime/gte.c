@@ -19,6 +19,7 @@ static int16_t RT[3][3], LLM[3][3], LCM[3][3];
 static int32_t TR[3], BK[3], FC[3];
 static int32_t OFX, OFY;
 static uint16_t H;
+int gte_projections;   // vertices projected (the game is drawing 3D)
 static int16_t DQA, ZSF3, ZSF4;
 static int32_t DQB;
 static uint32_t FLAG;
@@ -416,8 +417,8 @@ void gte_command(uint32_t op) {
     sf_shift = (op & (1u << 19)) ? 12 : 0;
     lm_flag = (op >> 10) & 1;
     switch (op & 0x3F) {
-    case 0x01: rtp(0, true); break;   // RTPS
-    case 0x30: rtp(0, false); rtp(1, false); rtp(2, true); break;   // RTPT
+    case 0x01: rtp(0, true); gte_projections++; break;   // RTPS
+    case 0x30: rtp(0, false); rtp(1, false); rtp(2, true); gte_projections += 3; break;   // RTPT
     case 0x06: {   // NCLIP
         int64_t v = (int64_t)SXY[0][0] * SXY[1][1] + (int64_t)SXY[1][0] * SXY[2][1] + (int64_t)SXY[2][0] * SXY[0][1]
                   - (int64_t)SXY[0][0] * SXY[2][1] - (int64_t)SXY[1][0] * SXY[0][1] - (int64_t)SXY[2][0] * SXY[1][1];

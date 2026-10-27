@@ -31,7 +31,10 @@ static uint64_t pace_ns;   // target time of the end of the previous vblank
 // Length of one emulated vblank in real time: 59.94 Hz, or exactly the display's rate when
 // buffer swaps pace emulation (so the timer never fights vsync).
 static uint64_t vblank_ns = 1000000000ull * 1001 / 60000;
-static bool fast_forward;
+static bool fast_forward;     // Tab held
+static bool fast_loading = true;   // fast-forward while the game loads from the CD
+static bool loading_ff;       // ... and it is loading now
+static bool fast(void) { return fast_forward || loading_ff; }
 static bool vsync = true;
 static bool vsync_paces;     // the display runs at a multiple of ~60 Hz, so buffer swaps pace emulation
 
@@ -224,7 +227,7 @@ static void update_rumble(void) {
     for (int port = 0; port < 2; port++) {
         SDL_Gamepad *gp = gamepads[port];
         uint8_t small = pad_motor_small[port], large = pad_motor_large[port];
-        bool on = rumble_enabled && port_type[port] == CTRL_DUALSHOCK && (small || large) && !fast_forward;
+        bool on = rumble_enabled && port_type[port] == CTRL_DUALSHOCK && (small || large) && !fast();
         if (!gp) { active[port] = false; continue; }
         if (on) {
             Uint16 low = (Uint16)(large * 257), high = small ? 0xC000 : 0;
@@ -423,7 +426,7 @@ static void push_audio(void) {
     int16_t buf[8192 * 2];
     int n = spu_take(buf, 8192);
     if (wav_out && n) { fwrite(buf, 4, (size_t)n, wav_out); wav_frames += (uint32_t)n; }
-    if (!audio || !n || fast_forward) return;
+    if (!audio || !n || fast()) return;
     // Dynamic rate control: nudge the playback rate so the queue hovers around ~50 ms,
     // which absorbs the 60 vs 59.94 Hz difference when the display paces emulation.
     const int target = 44100 * 4 / 20;
@@ -440,7 +443,7 @@ static void pace(void) {
     uint64_t now = SDL_GetTicksNS();
     if (!pace_ns || now > pace_ns + vblank_ns * 4) pace_ns = now;
     pace_ns += vblank_ns;
-    if (fast_forward) { pace_ns = now; return; }
+    if (fast()) { pace_ns = now; return; }
     // With vsync the swaps normally take us right up to the deadline; the timer is the safety
     // net for when they do not block (occluded window, vsync not honoured by the system).
     if (pace_ns > now + (vsync_paces ? 1000000u : 0u)) SDL_DelayPrecise(pace_ns - now);
@@ -450,7 +453,7 @@ void host_frame(void) {
     static uint64_t fps_t0;
     frame_count++;
     handle_events();
-    if (!fast_forward || (frame_count % 8) == 0) present_vblank();
+    if (!fast() || (frame_count % 8) == 0) present_vblank();
     else render_vblank();
     push_audio();
     if (opts.shot_every && frame_count % opts.shot_every == 0) save_screenshot();
@@ -530,8 +533,41 @@ static void poke_ram(void) {
     }
 }
 
+// What the CD, MDEC and GTE did this vblank, smoothed over a second: loading is reading data
+// with no streamed audio or video and no 3D scene around it (a race is never sped up).
+enum { ACT_IDLE, ACT_LOADING, ACT_STREAM, ACT_MUSIC, ACT_3D };
+static int activity;
+
+static void update_activity(void) {
+    extern int mdec_activity, gte_projections;
+    static int since_data = 1000, since_stream = 1000, since_music = 1000, since_3d = 1000;
+    int data, xa, cdda;
+    cdrom_activity(&data, &xa, &cdda);
+    since_data = data ? 0 : since_data + 1;
+    since_stream = xa || mdec_activity ? 0 : since_stream + 1;
+    since_music = cdda ? 0 : since_music + 1;
+    since_3d = gte_projections > 300 ? 0 : since_3d + 1;   // a race or a 3D scene is running
+    mdec_activity = gte_projections = 0;
+    int a = since_stream < 60 ? ACT_STREAM : since_music < 60 ? ACT_MUSIC
+          : since_data < 8 ? (since_3d < 60 ? ACT_3D : ACT_LOADING) : ACT_IDLE;
+    // Debug aid: CMR_TRACE_LOAD=1 logs the changes.
+    static int trace = -1, run_start;
+    if (trace < 0) trace = getenv("CMR_TRACE_LOAD") != NULL;
+    if (trace && a != activity) {
+        static const char *names[] = {"idle", "loading", "stream", "music", "reading during 3D"};
+        LOG("[load] frames %d-%d %s (%s)\n", run_start, frame_count - 1, names[activity],
+            module_active() ? module_active()->name : "-");
+        run_start = frame_count;
+    }
+    activity = a;
+    bool ff = fast_loading && !opts.turbo && a == ACT_LOADING;
+    if (ff != loading_ff) DBG(1, "[host] frame %d: %s\n", frame_count, ff ? "loading, fast-forward" : "normal speed");
+    loading_ff = ff;
+}
+
 static void vblank_event(void) {
     watch_ram();
+    update_activity();
     poke_ram();
     static int watching = -1;
     if (watching < 0) watching = getenv("CMR_WATCH") != NULL;
@@ -586,6 +622,7 @@ static void apply_setting(const char *k, const char *v) {
     else if (!strcmp(k, "vsync")) vsync = n;
     else if (!strcmp(k, "dither")) gpu_dither_enabled = n;
     else if (!strcmp(k, "rumble")) rumble_enabled = n;
+    else if (!strcmp(k, "fast_loading")) fast_loading = n;
     else if (!strcmp(k, "controller")) {
         for (int c = 0; c < 4; c++) if (!strcmp(v, controller_names[c])) controller_type = c;
     }
@@ -615,7 +652,8 @@ static void save_settings(void) {
     fprintf(f, "# Colin McRae Rally PC settings (also changeable with hotkeys and command-line options)\n");
     fprintf(f, "fullscreen = %d\nwindow = %d\nscale = %d\nhires = %d\nfilter = %d\nwidescreen = %d\n",
             opts.fullscreen, opts.scale, render_cfg.scale, render_cfg.hw, render_cfg.filter, render_cfg.widescreen);
-    fprintf(f, "interpolation = %d\nrumble = %d\n", render_cfg.interpolate, rumble_enabled);
+    fprintf(f, "interpolation = %d\nrumble = %d\nfast_loading = %d\n", render_cfg.interpolate, rumble_enabled,
+            fast_loading);
     fprintf(f, "pgxp = %d\nvsync = %d\ndither = %d\ncontroller = %s\ncpu = %u\n", pgxp_enabled, vsync,
             gpu_dither_enabled, controller_names[controller_type], cycles_per_insn);
     fclose(f);
@@ -629,6 +667,7 @@ static void usage(void) {
             "  --controller TYPE   auto (DualShock with a gamepad, else digital), dualshock,\n"
             "                      negcon (analog throttle/brake, no vibration), digital\n"
             "  --no-rumble         disable DualShock vibration\n"
+            "  --no-fast-loading   load at the original CD speed\n"
             "  --mute              no audio output\n"
             "  --cpu N             CPU cycles per instruction (default 2; 1 = faster CPU)\n"
             "  --no-dither         disable PlayStation dithering (toggle with F3)\n"
@@ -663,6 +702,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-vsync")) vsync = false;
         else if (!strcmp(argv[i], "--no-interpolation")) render_cfg.interpolate = false;
         else if (!strcmp(argv[i], "--no-rumble")) rumble_enabled = false;
+        else if (!strcmp(argv[i], "--no-fast-loading")) fast_loading = false;
         else if (!strcmp(argv[i], "--interval") && i + 1 < argc) frame_interval_override = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) {
             wav_out = fopen(argv[++i], "wb");

@@ -73,6 +73,7 @@ void cdrom_dma(uint32_t addr, uint32_t words);
 void cdrom_audio(int16_t *buf, int frames);   // CD-DA / XA samples at 44.1 kHz, stereo
 int cdrom_read_sector_raw(uint32_t lba, uint8_t *out2352);
 int cdrom_find_file(const char *path, uint32_t *lba, uint32_t *size);
+void cdrom_activity(int *data, int *xa, int *cdda);   // sectors delivered since the last call
 
 void spu_init(void);
 uint16_t spu_read(uint32_t addr);

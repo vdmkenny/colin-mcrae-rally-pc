@@ -17,37 +17,65 @@ This is an unofficial fan project, not affiliated with Codemasters or Sony.
 
 ## Getting started
 
-1. **Have your own copy of the game.** You need a disc image of the North American
-   PlayStation release (SCUS-94474), ripped from your disc as a `.cue` file with its `.bin`
-   tracks. Nothing from the game is in this repository.
-2. **Install the build tools**: CMake, Ninja, Python 3, a C compiler and SDL3 3.2 or newer.
+You need your own copy of the game: a disc image of the North American PlayStation release
+(SCUS-94474), ripped from your disc as a `.cue` file with its `.bin` tracks. Nothing from the
+game is in this repository. The build script checks the image, extracts and recompiles the
+game's executables, builds the program and remembers where the image is.
 
-   ```bash
-   brew install sdl3 cmake ninja                                  # macOS (Xcode command line tools for the compiler)
-   sudo apt install cmake ninja-build gcc python3 libsdl3-dev     # Debian 13 or newer
-   ```
+### macOS
 
-3. **Get the code and build it from your disc image.** The script checks the image, extracts
-   and recompiles the game's executables and builds the program:
+```bash
+xcode-select --install                 # the compiler, if you do not have it yet
+brew install git sdl3 cmake ninja      # Homebrew: https://brew.sh
+git clone https://github.com/vdmkenny/colin-mcrae-rally-pc.git
+cd colin-mcrae-rally-pc
+python3 tools/build_game.py "/path/to/Colin McRae Rally.cue"
+./build/cmrally
+```
 
-   ```bash
+### Ubuntu and Debian
+
+Ubuntu 26.04 or Debian 13 (trixie) and newer, with a working Vulkan driver (Mesa's, which
+desktop installs include, is fine):
+
+```bash
+sudo apt install git cmake ninja-build gcc python3 libsdl3-dev
+git clone https://github.com/vdmkenny/colin-mcrae-rally-pc.git
+cd colin-mcrae-rally-pc
+python3 tools/build_game.py "/path/to/Colin McRae Rally.cue"
+./build/cmrally
+```
+
+Ubuntu 24.04 and older have no SDL3 package: build and install SDL3 from source first
+([SDL's Linux guide](https://github.com/libsdl-org/SDL/blob/main/docs/README-linux.md)).
+
+### Windows (not tested yet)
+
+1. Install [Visual Studio 2022](https://visualstudio.microsoft.com/) (Community is free) with
+   the *Desktop development with C++* workload, which includes CMake and Ninja, plus
+   [Python 3](https://www.python.org/downloads/) and [Git](https://git-scm.com/).
+2. Download `SDL3-devel-<version>-VC.zip` from
+   [SDL's releases](https://github.com/libsdl-org/SDL/releases/latest) and extract it, for
+   example to `C:\SDL3`.
+3. In the *Developer PowerShell for VS 2022*, with `CMAKE_PREFIX_PATH` set to the extracted
+   `SDL3-<version>` folder:
+
+   ```powershell
+   $env:CMAKE_PREFIX_PATH = "C:\SDL3\SDL3-3.4.2"
    git clone https://github.com/vdmkenny/colin-mcrae-rally-pc.git
    cd colin-mcrae-rally-pc
-   python3 tools/build_game.py "/path/to/Colin McRae Rally.cue"
+   py tools\build_game.py "C:\path\to\Colin McRae Rally.cue"
    ```
 
-4. **Play:**
+4. Run the program the script names when it finishes (`build\cmrally.exe`); `SDL3.dll` is
+   copied beside it.
 
-   ```bash
-   ./build/cmrally
-   ```
+### Playing
 
-   It remembers where your disc image is. A gamepad works as a DualShock; on the keyboard the
-   arrow keys steer and X, C, Z and S are the PlayStation's face buttons (see
-   [Controls](#controls)). F11 toggles fullscreen and Shift+Esc quits. Settings are saved in
-   `cmrally.ini`; [Options](#options) lists them.
-
-To add cars of your own, see [Extra cars](#extra-cars).
+A gamepad works as a DualShock; on the keyboard the arrow keys steer and X, C, Z and S are
+the PlayStation's face buttons (see [Controls](#controls)). F11 toggles fullscreen and
+Shift+Esc quits. Settings are saved in `cmrally.ini`; [Options](#options) lists them. To add
+cars of your own, see [Extra cars](#extra-cars).
 
 ## Features
 
@@ -106,7 +134,7 @@ To add cars of your own, see [Extra cars](#extra-cars).
 
 ## Building
 
-Requirements: CMake 3.20+, a C11 compiler, Python 3, SDL3 (3.2 or newer) and a GPU with
+Requirements: CMake 3.21+, a C11 compiler, Python 3, SDL3 (3.2 or newer) and a GPU with
 Vulkan (Linux, Windows) or Metal (macOS).
 Developed on macOS with Clang. Linux builds with GCC are checked in a Debian container
 (`tools/docker/Dockerfile`), which also runs the game on Mesa's software Vulkan driver. The

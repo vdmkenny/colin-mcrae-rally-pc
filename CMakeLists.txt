@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 project(cmrally C)
 
 set(CMAKE_C_STANDARD 11)
@@ -38,6 +38,12 @@ else()
   target_link_libraries(cmrally PRIVATE m)
 endif()
 target_link_libraries(cmrally PRIVATE game_code SDL3::SDL3)
+# Windows looks for SDL3.dll beside the program
+if(WIN32)
+  add_custom_command(TARGET cmrally POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:cmrally> $<TARGET_FILE_DIR:cmrally>
+    COMMAND_EXPAND_LISTS)
+endif()
 
 # The call-stack trace relies on __attribute__((cleanup)), available in GCC and Clang.
 if(MSVC)

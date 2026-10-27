@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Disassemble a range of a module: dis.py <module> <start-hex> [count]"""
+"""Disassemble a range of a module: disasm.py <module> <start-hex> [count]"""
 import os
 import sys
 

@@ -282,9 +282,6 @@ static void handle_events(void) {
                 LOG("[render] %s renderer\n", render_cfg.hw ? "high-resolution" : "original 1x");
             } else if (e.key.scancode == SDL_SCANCODE_F7) {
                 sio_analog_button(0);
-            } else if (e.key.scancode == SDL_SCANCODE_F6) {
-                render_cfg.interpolate = !render_cfg.interpolate;
-                LOG("[render] frame interpolation %s\n", render_cfg.interpolate ? "on" : "off");
             } else if (e.key.scancode == SDL_SCANCODE_F5) {
                 pgxp_enabled = !pgxp_enabled;
                 LOG("[render] precise vertices %s\n", pgxp_enabled ? "on" : "off");
@@ -330,15 +327,12 @@ static void handle_events(void) {
 extern int frame_interval_override;
 
 // ----------------------------------------------------------------- frames
-// Images are presented at the refresh rate of the monitor the window is on. When that rate is a
-// multiple of ~60 Hz (60, 120, 240 ...) each emulated vblank lasts exactly that many refreshes
-// and, with vsync, the buffer swaps pace emulation. At other rates (75, 144, 165 ...) a timer
-// paces emulation at 59.94 Hz and one image is presented per refresh, interpolated for the
-// moment it reaches the screen.
-static uint64_t refresh_ns = 1000000000ull * 1001 / 60000;   // one refresh of the current monitor
-static int refreshes_per_vblank = 1;   // display-locked: refreshes per emulated vblank; 0: free-running
-static int presents_override;          // testing: images per vblank
-static uint64_t last_present;          // when the previous image went out (free-running)
+// With vsync, images are presented to the refresh of the monitor the window is on. When its
+// rate is a multiple of ~60 Hz (60, 120, 240 ...) each emulated vblank lasts exactly that many
+// refreshes, the image is shown for each of them, and the buffer swaps pace emulation. At other
+// rates (75, 144, 165 ...) a timer paces emulation at 59.94 Hz and each new image waits for the
+// next refresh.
+static int refreshes_per_vblank = 1;   // display-locked: refreshes per emulated vblank; 0: timer-paced
 static int presents_counted;           // for the fps log
 
 static void update_display_timing(void) {
@@ -347,63 +341,33 @@ static void update_display_timing(void) {
     if (getenv("CMR_REFRESH_HZ")) hz = (float)atof(getenv("CMR_REFRESH_HZ"));   // testing other monitors
     int k = (int)(hz / 59.94f + 0.5f);
     float off = hz - 59.94f * (float)k;
-    refresh_ns = (uint64_t)(1e9 / hz);
-    refreshes_per_vblank = presents_override > 0 ? presents_override : k >= 1 && k <= 8 && off > -2.0f && off < 2.0f ? k : 0;
-    vsync_paces = vsync && refreshes_per_vblank && presents_override <= 0;
+    refreshes_per_vblank = k >= 1 && k <= 8 && off > -2.0f && off < 2.0f ? k : 0;
+    vsync_paces = vsync && refreshes_per_vblank;
     vblank_ns = vsync_paces ? (uint64_t)(1e9 * k / hz) : 1000000000ull * 1001 / 60000;
-    LOG("[host] display %.2f Hz: %s, %s\n", hz,
-        refreshes_per_vblank ? (refreshes_per_vblank > 1 ? "several images per vblank" : "one image per vblank")
-                             : "one image per refresh",
-        vsync_paces ? "vsync paces emulation" : "timer paces emulation");
+    LOG("[host] display %.2f Hz, %s\n", hz, vsync_paces ? "vsync paces emulation" : "timer paces emulation");
 }
 
-static void present(float alpha) {
+static void present(void) {
     presents_counted++;
     DisplayInfo d;
     gpu_display_info(&d);
     if (!render_cfg.hw || d.rgb24) {
         int w, h, stride;
         gpu_display(frame_rgba, &w, &h, &stride);
-        render_present(&d, frame_rgba, 1.0f);
+        render_present(&d, frame_rgba);
     } else {
-        render_present(&d, NULL, alpha);
+        render_present(&d, NULL);
     }
 }
 
-// Shows this vblank's images. A game frame lasting `interval` vblanks is spread over all the
-// images shown during it, the in-between ones interpolated.
+// Shows this vblank's image: once per refresh it lasts when vsync paces emulation.
 static void present_vblank(void) {
-    int interval = render_frame_interval(), k = render_vblanks_since_flip();
-    bool interp = render_cfg.interpolate && interval >= 2 && interval <= 4;
-    uint64_t start = pace_ns, deadline = pace_ns + vblank_ns;   // this vblank's share of real time
-    int n = opts.turbo ? (presents_override > 0 ? presents_override : 1) : refreshes_per_vblank;
-    if (n) {
-        for (int p = 0; p < n; p++) {
-            // Extra images are optional: skip them rather than slow the game down.
-            if (p > 0 && !opts.turbo && SDL_GetTicksNS() + vblank_ns / (uint64_t)n / 2 > deadline) break;
-            float alpha = interp ? (float)(k * n + p + 1) / (float)(interval * n) : 1.0f;
-            present(alpha > 1.0f ? 1.0f : alpha);
-            if (p + 1 < n && !vsync_paces && !opts.turbo) SDL_DelayPrecise(vblank_ns / (uint64_t)n);
-        }
-    } else if (!interp) {
-        present(1.0f);   // nothing moves between vblanks
-    } else {
-        // One image per refresh until the next vblank is due. With vsync the swap waits for the
-        // refresh; the timer keeps the rate when it does not (vsync off, occluded window).
-        for (;;) {
-            uint64_t now = SDL_GetTicksNS();
-            if (now > last_present + 2 * refresh_ns) last_present = 0;
-            if (last_present) {
-                uint64_t due = last_present + (vsync ? refresh_ns * 3 / 4 : refresh_ns);
-                if (due >= deadline) break;   // that image belongs to the next vblank
-                if (due > now) { SDL_DelayPrecise(due - now); now = due; }
-            }
-            // the image is on screen about one refresh later with vsync
-            double phase = (double)(now + (vsync ? refresh_ns : 0) - start) / (double)vblank_ns;
-            float alpha = (float)(((double)k + phase) / (double)interval);
-            present(alpha > 1.0f ? 1.0f : alpha);
-            last_present = vsync ? SDL_GetTicksNS() : now;
-        }
+    int n = vsync_paces && !opts.turbo ? refreshes_per_vblank : 1;
+    uint64_t deadline = pace_ns + vblank_ns;   // this vblank's share of real time
+    for (int p = 0; p < n; p++) {
+        // Repeats are optional: skip them rather than slow the game down.
+        if (p > 0 && SDL_GetTicksNS() + vblank_ns / (uint64_t)n / 2 > deadline) break;
+        present();
     }
     render_vblank();
 }
@@ -482,12 +446,9 @@ void host_frame(void) {
     }
     if (log_level >= 1 && frame_count % 300 == 0) {
         uint64_t now = SDL_GetTicksNS();
-        extern int interp_stat_matched, interp_stat_total, interp_stat_found;
         if (fps_t0)
-            LOG("[host] frame %d, %.1f fps emulated, %.1f presented, interpolated vertices %d/%d (keys found %d)\n",
-                frame_count, 300e9 / (double)(now - fps_t0), presents_counted * 1e9 / (double)(now - fps_t0),
-                interp_stat_matched, interp_stat_total, interp_stat_found);
-        interp_stat_matched = interp_stat_total = interp_stat_found = 0;
+            LOG("[host] frame %d, %.1f fps emulated, %.1f presented\n", frame_count, 300e9 / (double)(now - fps_t0),
+                presents_counted * 1e9 / (double)(now - fps_t0));
         presents_counted = 0;
         fps_t0 = now;
     }
@@ -631,7 +592,6 @@ static void apply_setting(const char *k, const char *v) {
     else if (!strcmp(k, "msaa")) render_cfg.msaa = msaa_setting(n);
     else if (!strcmp(k, "settings_version")) settings_version = n;
     else if (!strcmp(k, "pgxp")) pgxp_enabled = n;
-    else if (!strcmp(k, "interpolation")) render_cfg.interpolate = n;
     else if (!strcmp(k, "vsync")) vsync = n;
     else if (!strcmp(k, "dither")) gpu_dither_enabled = n;
     else if (!strcmp(k, "rumble")) rumble_enabled = n;
@@ -670,8 +630,7 @@ static void save_settings(void) {
     fprintf(f, "settings_version = %d\nmsaa = %d\n", SETTINGS_VERSION, render_cfg.msaa);
     fprintf(f, "fullscreen = %d\nwindow = %d\nscale = %d\nhires = %d\nfilter = %d\nwidescreen = %d\n",
             opts.fullscreen, opts.scale, render_cfg.scale, render_cfg.hw, render_cfg.filter, render_cfg.widescreen);
-    fprintf(f, "interpolation = %d\nrumble = %d\nfast_loading = %d\n", render_cfg.interpolate, rumble_enabled,
-            fast_loading);
+    fprintf(f, "rumble = %d\nfast_loading = %d\n", rumble_enabled, fast_loading);
     fprintf(f, "pgxp = %d\nvsync = %d\ndither = %d\ncontroller = %s\ncpu = %u\n", pgxp_enabled, vsync,
             gpu_dither_enabled, controller_names[controller_type], cycles_per_insn);
     fclose(f);
@@ -696,7 +655,6 @@ static void usage(void) {
             "  --msaa N            anti-aliasing samples: 0 (off), 2, 4 (default) or 8 (cycle with F8)\n"
             "  --no-pgxp           disable sub-pixel vertex precision (toggle with F5)\n"
             "  --no-vsync          do not sync presentation to the display\n"
-            "  --no-interpolation  show only the game's own frames (30 fps in races)\n"
             "  --log N             debug log level\n"
             "keys: arrows=d-pad X=cross C=circle Z=square S=triangle Q/W=L1/R1 A/D=L2/R2\n"
             "      Enter=start RShift=select Tab=fast-forward F11=fullscreen Shift+Esc=quit\n");
@@ -722,7 +680,6 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--msaa") && i + 1 < argc) render_cfg.msaa = msaa_setting(atoi(argv[++i]));
         else if (!strcmp(argv[i], "--no-pgxp")) pgxp_enabled = false;
         else if (!strcmp(argv[i], "--no-vsync")) vsync = false;
-        else if (!strcmp(argv[i], "--no-interpolation")) render_cfg.interpolate = false;
         else if (!strcmp(argv[i], "--no-rumble")) rumble_enabled = false;
         else if (!strcmp(argv[i], "--no-fast-loading")) fast_loading = false;
         else if (!strcmp(argv[i], "--interval") && i + 1 < argc) frame_interval_override = atoi(argv[++i]);
@@ -747,7 +704,6 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--mute")) opts.mute = true;
         else if (!strcmp(argv[i], "--hidden")) opts.hidden = true;
         else if (!strcmp(argv[i], "--save-dir") && i + 1 < argc) i++;
-        else if (!strcmp(argv[i], "--presents") && i + 1 < argc) presents_override = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(); return 0; }
         else if (argv[i][0] != '-') opts.cue = argv[i];
         else { usage(); return 1; }

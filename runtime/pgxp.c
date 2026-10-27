@@ -77,9 +77,8 @@ void pgxp_vsrc_reg(int v, int rt, uint32_t value) {
 
 void pgxp_vsrc_addr(int v, uint32_t addr) { pgxp_vsrc[v] = addr; }
 
-// Vertex identity for frame interpolation: where the input vertex was loaded from, or its
-// object-space coordinates when that is unknown. Instances and repeated projections of the
-// same vertex share an identity; the renderer pairs them up by proximity.
+// Vertex identity (nonzero for every GTE-projected vertex): where the input vertex was loaded
+// from, or its object-space coordinates when that is unknown.
 void pgxp_new_frame(void) {}
 
 uint32_t pgxp_vertex_key(int v, int16_t x, int16_t y, int16_t z) {

@@ -9,7 +9,7 @@ typedef struct {
     float w;         // 1 for affine; view depth for perspective-correct texturing
     uint8_t r, g, b;
     float u, v;      // texel coordinates
-    uint32_t key;    // vertex identity across frames (0 = none), for frame interpolation
+    uint32_t key;    // identity of a GTE-projected vertex (0 = none)
     uint32_t xyword; // the integer screen position word the game supplied
     bool precise;    // x/y came from the GTE (or are exact for 2D primitives)
 } HwVertex;
@@ -36,7 +36,6 @@ typedef struct {
     bool filter;      // bilinear texture filtering
     bool widescreen;  // 16:9 output with the GTE projection widened to match
     int scale;        // internal resolution multiplier, 0 = match the window
-    bool interpolate; // generate in-between frames when the game renders below 60 fps
     int msaa;         // anti-aliasing samples: 1 (off), 2, 4 or 8
 } RenderConfig;
 extern RenderConfig render_cfg;
@@ -44,10 +43,7 @@ extern bool widescreen_active;   // widescreen applies to the current frames (3D
 
 bool render_init(SDL_Window *window);
 bool render_set_vsync(bool on);   // false if that mode is unavailable
-// alpha: how far into the current game frame this display refresh is (1 = the frame itself)
-void render_present(const DisplayInfo *d, const uint32_t *rgba_1x, float alpha);
-int render_frame_interval(void);       // vblanks the last game frame lasted
-int render_vblanks_since_flip(void);
+void render_present(const DisplayInfo *d, const uint32_t *rgba_1x);
 void render_vblank(void);
 bool render_read_display(const DisplayInfo *d, uint32_t **out, int *w, int *h);
 int render_scale(void);

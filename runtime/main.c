@@ -9,6 +9,8 @@
 PadState pads[2];
 bool pad_analog_mode = false;
 void sio_set_port(int port, bool negcon, bool analog);
+void sio_analog_button(int port);
+extern uint8_t pad_motor_small[2], pad_motor_large[2];
 static bool negcon_mode;
 enum { CTRL_AUTO, CTRL_DIGITAL, CTRL_DUALSHOCK, CTRL_NEGCON };
 static int controller_type = CTRL_AUTO;
@@ -42,7 +44,9 @@ static struct {
     const char *shot_dir;
     const char *script;      // testing: scripted input "frame:buttons,..."
     bool turbo;              // testing: no frame pacing
-} opts = {NULL, false, 3, 0, 0, ".", NULL, false};
+    bool mute;               // no audio output (WAV capture still works)
+    bool hidden;             // testing: no visible window
+} opts = {NULL, false, 3, 0, 0, ".", NULL, false, false, false};
 
 static int frame_count;
 
@@ -124,7 +128,7 @@ static uint8_t twist8(Sint16 v) {
 
 static uint8_t trigger8(Sint16 v) { return v <= 0 ? 0 : (uint8_t)(v * 255 / 32767); }
 
-static void poll_gamepad(PadState *p, SDL_Gamepad *gp, bool negcon) {
+static void poll_gamepad(PadState *p, SDL_Gamepad *gp, bool negcon, bool dualshock) {
     if (!gp) return;
     static const struct { SDL_GamepadButton b; uint16_t m; } map[] = {
         {SDL_GAMEPAD_BUTTON_SOUTH, PAD_CROSS}, {SDL_GAMEPAD_BUTTON_EAST, PAD_CIRCLE},
@@ -159,7 +163,7 @@ static void poll_gamepad(PadState *p, SDL_Gamepad *gp, bool negcon) {
         p->buttons &= ~(PAD_L2 | PAD_R2);
         return;
     }
-    if (!pad_analog_mode) {
+    if (!dualshock) {
         // digital pad: the left stick doubles as the d-pad
         const int dead = 14000;
         if (lx < -dead) p->buttons |= PAD_LEFT;
@@ -169,19 +173,21 @@ static void poll_gamepad(PadState *p, SDL_Gamepad *gp, bool negcon) {
     }
 }
 
-// Controller type per port. "auto" presents a NeGcon where a gamepad is connected (the game
-// supports its analog steering and throttle, but not DualShock sticks), else a digital pad.
+// Controller type per port. "auto" presents a DualShock where a gamepad is connected (analog
+// steering once in analog mode, and vibration), else a digital pad for the keyboard. The game
+// also supports Namco's NeGcon, which adds analog throttle and brake but has no vibration.
 static bool port_negcon[2];
+static int port_type[2] = {-1, -1};
 
 static void update_controller_types(void) {
     static int shown[2] = {-1, -1};
     for (int port = 0; port < 2; port++) {
         int t = controller_type;
-        if (t == CTRL_AUTO) t = gamepads[port] ? CTRL_NEGCON : CTRL_DIGITAL;
+        if (t == CTRL_AUTO) t = gamepads[port] ? CTRL_DUALSHOCK : CTRL_DIGITAL;
         if (shown[port] != t) LOG("[input] port %d: %s\n", port + 1, controller_names[t]);
-        shown[port] = t;
+        if (port_type[port] != t) sio_set_port(port, t == CTRL_NEGCON, t == CTRL_DUALSHOCK);
+        shown[port] = port_type[port] = t;
         port_negcon[port] = t == CTRL_NEGCON;
-        sio_set_port(port, t == CTRL_NEGCON, t == CTRL_DUALSHOCK);
     }
     negcon_mode = port_negcon[0];
 }
@@ -208,6 +214,27 @@ static void assign_gamepads(void) {
     update_controller_types();
 }
 
+// DualShock vibration: the large motor maps to the gamepad's low-frequency rumble, the small
+// (on/off) motor to the high-frequency one. Renewed every vblank while running.
+static bool rumble_enabled = true;
+
+static void update_rumble(void) {
+    static bool active[2];
+    for (int port = 0; port < 2; port++) {
+        SDL_Gamepad *gp = gamepads[port];
+        uint8_t small = pad_motor_small[port], large = pad_motor_large[port];
+        bool on = rumble_enabled && port_type[port] == CTRL_DUALSHOCK && (small || large) && !fast_forward;
+        if (!gp) { active[port] = false; continue; }
+        if (on) {
+            Uint16 low = (Uint16)(large * 257), high = small ? 0xC000 : 0;
+            SDL_RumbleGamepad(gp, low, high, 100);
+        } else if (active[port]) {
+            SDL_RumbleGamepad(gp, 0, 0, 0);
+        }
+        active[port] = on;
+    }
+}
+
 static void handle_events(void) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -218,6 +245,12 @@ static void handle_events(void) {
         case SDL_EVENT_GAMEPAD_ADDED:
         case SDL_EVENT_GAMEPAD_REMOVED:
             assign_gamepads();
+            break;
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            // the Guide/Home button is the DualShock's ANALOG button
+            if (e.gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE)
+                for (int port = 0; port < 2; port++)
+                    if (gamepads[port] && SDL_GetGamepadID(gamepads[port]) == e.gbutton.which) sio_analog_button(port);
             break;
         case SDL_EVENT_KEY_DOWN:
             if (e.key.scancode == SDL_SCANCODE_F11 ||
@@ -233,6 +266,8 @@ static void handle_events(void) {
             } else if (e.key.scancode == SDL_SCANCODE_F4) {
                 render_cfg.hw = !render_cfg.hw;
                 LOG("[render] %s renderer\n", render_cfg.hw ? "high-resolution" : "original 1x");
+            } else if (e.key.scancode == SDL_SCANCODE_F7) {
+                sio_analog_button(0);
             } else if (e.key.scancode == SDL_SCANCODE_F6) {
                 render_cfg.interpolate = !render_cfg.interpolate;
                 LOG("[render] frame interpolation %s\n", render_cfg.interpolate ? "on" : "off");
@@ -265,7 +300,12 @@ static void handle_events(void) {
                 if (p->buttons & PAD_SQUARE) p->negcon_ii = 255;
             }
         }
-        poll_gamepad(p, gamepads[port], port_negcon[port]);
+        poll_gamepad(p, gamepads[port], port_negcon[port], port_type[port] == CTRL_DUALSHOCK);
+        if (port_type[port] == CTRL_DUALSHOCK && p->lx == 0x80) {
+            // in analog mode the game steers only with the stick; let the d-pad steer too
+            if (p->buttons & PAD_LEFT) p->lx = 0x00;
+            if (p->buttons & PAD_RIGHT) p->lx = 0xFF;
+        }
     }
 }
 
@@ -359,6 +399,13 @@ void host_frame(void) {
     else render_vblank();
     push_audio();
     if (opts.shot_every && frame_count % opts.shot_every == 0) save_screenshot();
+    {
+        // testing: CMR_ANALOG_AT=<frame> presses the DualShock ANALOG button on port 1
+        static long at = -2;
+        if (at == -2) at = getenv("CMR_ANALOG_AT") ? atol(getenv("CMR_ANALOG_AT")) : -1;
+        if (at == frame_count) sio_analog_button(0);
+    }
+    update_rumble();
     if (opts.exit_after && frame_count >= opts.exit_after) {
         if (getenv("CMR_DUMP_RAM")) {
             FILE *f = fopen(getenv("CMR_DUMP_RAM"), "wb");
@@ -458,6 +505,7 @@ static void apply_setting(const char *k, const char *v) {
     else if (!strcmp(k, "interpolation")) render_cfg.interpolate = n;
     else if (!strcmp(k, "vsync")) vsync = n;
     else if (!strcmp(k, "dither")) gpu_dither_enabled = n;
+    else if (!strcmp(k, "rumble")) rumble_enabled = n;
     else if (!strcmp(k, "controller")) {
         for (int c = 0; c < 4; c++) if (!strcmp(v, controller_names[c])) controller_type = c;
     }
@@ -487,7 +535,7 @@ static void save_settings(void) {
     fprintf(f, "# Colin McRae Rally PC settings (also changeable with hotkeys and command-line options)\n");
     fprintf(f, "fullscreen = %d\nwindow = %d\nscale = %d\nhires = %d\nfilter = %d\nwidescreen = %d\n",
             opts.fullscreen, opts.scale, render_cfg.scale, render_cfg.hw, render_cfg.filter, render_cfg.widescreen);
-    fprintf(f, "interpolation = %d\n", render_cfg.interpolate);
+    fprintf(f, "interpolation = %d\nrumble = %d\n", render_cfg.interpolate, rumble_enabled);
     fprintf(f, "pgxp = %d\nvsync = %d\ndither = %d\ncontroller = %s\ncpu = %u\n", pgxp_enabled, vsync,
             gpu_dither_enabled, controller_names[controller_type], cycles_per_insn);
     fclose(f);
@@ -498,8 +546,10 @@ static void usage(void) {
             "usage: cmrally [options] [game.cue]\n"
             "  --fullscreen        start fullscreen (toggle with F11 / Alt+Enter)\n"
             "  --window N          window size as a multiple of 320x240 (default 3)\n"
-            "  --controller TYPE   auto (NeGcon with a gamepad, else digital), negcon, digital,\n"
-            "                      dualshock\n"
+            "  --controller TYPE   auto (DualShock with a gamepad, else digital), dualshock,\n"
+            "                      negcon (analog throttle/brake, no vibration), digital\n"
+            "  --no-rumble         disable DualShock vibration\n"
+            "  --mute              no audio output\n"
             "  --cpu N             CPU cycles per instruction (default 2; 1 = faster CPU)\n"
             "  --no-dither         disable PlayStation dithering (toggle with F3)\n"
             "  --software          show the original 1x software renderer (toggle with F4)\n"
@@ -532,6 +582,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-pgxp")) pgxp_enabled = false;
         else if (!strcmp(argv[i], "--no-vsync")) vsync = false;
         else if (!strcmp(argv[i], "--no-interpolation")) render_cfg.interpolate = false;
+        else if (!strcmp(argv[i], "--no-rumble")) rumble_enabled = false;
         else if (!strcmp(argv[i], "--interval") && i + 1 < argc) frame_interval_override = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) {
             wav_out = fopen(argv[++i], "wb");
@@ -549,6 +600,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--shot-dir") && i + 1 < argc) opts.shot_dir = argv[++i];
         else if (!strcmp(argv[i], "--script") && i + 1 < argc) opts.script = argv[++i];
         else if (!strcmp(argv[i], "--turbo")) opts.turbo = true;
+        else if (!strcmp(argv[i], "--mute")) opts.mute = true;
+        else if (!strcmp(argv[i], "--hidden")) opts.hidden = true;
         else if (!strcmp(argv[i], "--save-dir") && i + 1 < argc) i++;
         else if (!strcmp(argv[i], "--presents") && i + 1 < argc) presents_override = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(); return 0; }
@@ -578,7 +631,8 @@ int main(int argc, char **argv) {
     int win_w = (render_cfg.widescreen ? 427 : 320) * opts.scale;
     window = SDL_CreateWindow("Colin McRae Rally", win_w, 240 * opts.scale,
                               SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
-                                  (opts.fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+                                  (opts.fullscreen ? SDL_WINDOW_FULLSCREEN : 0) |
+                                  (opts.hidden ? SDL_WINDOW_HIDDEN : 0));
     if (!window || !render_init(window)) {
         fprintf(stderr, "Cannot create an OpenGL 3.3 window: %s\n", SDL_GetError());
         return 1;
@@ -595,10 +649,11 @@ int main(int argc, char **argv) {
     LOG("[host] display %.2f Hz, %d image%s per vblank, %s\n", hz, presents_per_vblank,
         presents_per_vblank > 1 ? "s" : "", vsync_paces ? "vsync paces emulation" : "timer paces emulation");
     SDL_AudioSpec spec = {SDL_AUDIO_S16, 2, 44100};
-    audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
-    if (audio) SDL_ResumeAudioStreamDevice(audio);
-    else LOG("audio: %s\n", SDL_GetError());
-    pad_analog_mode = controller_type == CTRL_DUALSHOCK;
+    if (!opts.mute) {
+        audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+        if (audio) SDL_ResumeAudioStreamDevice(audio);
+        else LOG("audio: %s\n", SDL_GetError());
+    }
     assign_gamepads();
 
     memset(psx_ram, 0, sizeof psx_ram);

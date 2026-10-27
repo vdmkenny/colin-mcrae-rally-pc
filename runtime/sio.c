@@ -10,6 +10,8 @@ static uint8_t tx_pending;
 typedef struct {
     bool negcon;            // Namco NeGcon: twist steering, analog I/II/L
     bool analog;            // reports as 0x73 instead of 0x41
+    bool locked;            // the game locked the mode (ANALOG button disabled)
+    bool auto_analog;       // press ANALOG for the player whenever the game leaves digital mode
     bool config;            // in DualShock configuration mode
     uint8_t cmd;
     int pos;                // byte index within the current command
@@ -18,7 +20,8 @@ typedef struct {
     uint8_t rumble_map[6];
     uint8_t motor_small, motor_large;
 } Pad;
-static Pad padsio[2];
+static Pad padsio[2] = {{.rumble_map = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}},
+                        {.rumble_map = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}}};
 static enum { DEV_NONE, DEV_PAD, DEV_IGNORE } device;
 static int seq;
 
@@ -77,6 +80,7 @@ static uint8_t pad_exchange(int port, uint8_t tx, bool *ack) {
     Pad *p = &padsio[port];
     *ack = true;
     if (seq == 1) {
+        if (log_level >= 2 && tx != 0x42) LOG("[pad] port %d cmd %02x (config=%d analog=%d)\n", port + 1, tx, p->config, p->analog);
         p->cmd = tx;
         p->pos = 0;
         bool valid = tx == 0x42 || (!p->negcon && (tx == 0x43 || (p->config && tx >= 0x40 && tx <= 0x4F)));
@@ -91,18 +95,23 @@ static uint8_t pad_exchange(int port, uint8_t tx, bool *ack) {
     uint8_t r = i < p->reply_len ? p->reply[i] : 0;
     switch (p->cmd) {
     case 0x42:
-        if (!p->config) {
-            for (int k = 0; k < 6; k++) {
-                if (p->rumble_map[k] == 0x00 && i == k) pad_motor_small[port] = tx ? 0xFF : 0;
-                if (p->rumble_map[k] == 0x01 && i == k) pad_motor_large[port] = tx;
-            }
+        // vibration: the bytes the game mapped with 0x4D drive the small (on/off) and large motors
+        if (!p->config && i < 6) {
+            if (p->rumble_map[i] == 0x00) pad_motor_small[port] = tx ? 0xFF : 0;
+            if (p->rumble_map[i] == 0x01) pad_motor_large[port] = tx;
         }
         break;
     case 0x43:
-        if (i == 0) p->config = tx == 1;
+        if (i == 0) {
+            bool leaving = p->config && tx == 0;
+            p->config = tx == 1;
+            // leaving configuration in an unlocked digital mode: the player would press ANALOG
+            if (leaving && p->auto_analog && !p->analog && !p->locked) p->analog = true;
+        }
         break;
     case 0x44:
         if (p->config && i == 0) p->analog = tx == 1;
+        if (p->config && i == 1) p->locked = tx == 3;
         break;
     case 0x46:
         if (i == 0) {
@@ -203,7 +212,17 @@ void sio_write(uint32_t addr, uint32_t v, int size) {
 
 
 
+// The DualShock's ANALOG button: switches between digital and analog mode unless locked.
+void sio_analog_button(int port) {
+    Pad *p = &padsio[port & 1];
+    if (p->negcon || p->locked) return;
+    p->analog = !p->analog;
+    p->auto_analog = p->analog;
+    LOG("[pad] port %d: %s mode\n", (port & 1) + 1, p->analog ? "analog" : "digital");
+}
+
 void sio_set_port(int port, bool negcon, bool analog) {
     padsio[port & 1].negcon = negcon;
     padsio[port & 1].analog = analog;
+    padsio[port & 1].auto_analog = analog;
 }

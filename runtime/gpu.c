@@ -2,6 +2,7 @@
 #include "psx.h"
 #include "pgxp.h"
 #include "render.h"
+#include <math.h>
 #include <stdlib.h>
 
 uint16_t vram[1024 * 512];
@@ -250,16 +251,26 @@ static HwVertex hw_vtx(const Vtx *v, bool perspective) {
     h.key = v->precise ? v->key : 0;
     h.xyword = v->xy;
     h.precise = v->precise;
+    h.clip = false;
     return h;
+}
+
+// A GTE vertex the game only has a clamped screen position for (too near or behind the camera).
+static bool clipped(const Vtx *v) {
+    return v->precise && (v->fw <= 0.0f || fabsf(v->fx - (float)v->x) > 2.0f || fabsf(v->fy - (float)v->y) > 2.0f);
 }
 
 static void hw_tri(const Vtx *a, const Vtx *b, const Vtx *c, const HwPrim *p) {
     bool persp = p->textured;   // the renderer drops depth unless all three vertices have it
-    HwVertex v[3] = {hw_vtx(a, persp), hw_vtx(b, persp), hw_vtx(c, persp)};
-    // Same size limit as the hardware: oversized polygons are not drawn at all.
+    bool clip = clipped(a) || clipped(b) || clipped(c);   // drawn in 3D if it can be (see resolve_frame)
+    HwVertex v[3] = {hw_vtx(a, persp || clip), hw_vtx(b, persp || clip), hw_vtx(c, persp || clip)};
+    v[0].clip = clipped(a); v[1].clip = clipped(b); v[2].clip = clipped(c);
+    // Same size limit as the hardware: oversized polygons are not drawn at all. Polygons with a
+    // vertex too near the camera are decided by the renderer, once it knows whether they can be
+    // drawn in 3D (see resolve_frame).
     int minx = min3(a->x, b->x, c->x), maxx = max3(a->x, b->x, c->x);
     int miny = min3(a->y, b->y, c->y), maxy = max3(a->y, b->y, c->y);
-    if (maxx - minx >= 1024 || maxy - miny >= 512) return;
+    if ((maxx - minx >= 1024 || maxy - miny >= 512) && !v[0].clip && !v[1].clip && !v[2].clip) return;
     hw_triangle(v, p);
 }
 

@@ -70,6 +70,8 @@ void gte_command(uint32_t op);
 void pgxp_swc2(uint32_t addr, int reg);
 void pgxp_mfc2(int rt, int reg, uint32_t value);
 void pgxp_sw(uint32_t addr, int rt, uint32_t value);
+void pgxp_lw(int rt, uint32_t addr, uint32_t value);
+void pgxp_lwc2(uint32_t addr, int reg);
 void pgxp_prov(int rt, uint32_t addr, uint32_t value);
 void pgxp_vsrc_reg(int v, int rt, uint32_t value);
 void pgxp_vsrc_addr(int v, uint32_t addr);

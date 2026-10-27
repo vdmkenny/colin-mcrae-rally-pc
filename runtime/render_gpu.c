@@ -375,7 +375,7 @@ static void draw_copy(int sx, int sy, int dx, int dy, int w, int h) {
 // software VRAM, so this is invisible to it. Seeing the whole frame first allows giving vertices
 // the CPU copied from GTE results the precise position of the original (closes seams between
 // polygons), and classifying primitives for widescreen.
-typedef enum { OP_TRI, OP_FILL, OP_UPLOAD, OP_COPY } OpType;
+typedef enum { OP_TRI, OP_FILL, OP_UPLOAD, OP_COPY, OP_NONE } OpType;
 typedef struct {
     uint8_t type;
     HwVertex v[3];
@@ -443,12 +443,19 @@ void hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
 void hw_vram_changed(void) { vram_dirty = true; }
 
 // Whole-frame vertex cache: vertices without precise data take the precise position of a
-// GTE vertex at the same integer screen position in the same drawing area.
+// GTE vertex at the same integer screen position in the same drawing area. Clamped positions
+// (vertices too near the camera) are shared by unrelated vertices more easily; one that
+// different vertices have is not used.
 #define VC_SLOTS 32768
-static struct { uint32_t xy, gen; int ox, oy; float x, y, w; uint32_t key; } vc[VC_SLOTS];
+static struct { uint32_t xy, gen; int ox, oy; float x, y, w; uint32_t key; bool clip, ambiguous; } vc[VC_SLOTS];
 static uint32_t vc_gen = 1;
 
 static uint32_t vc_hash(uint32_t xy, int ox, int oy) { return ((xy ^ (uint32_t)(ox * 131 + oy * 7919)) * 0x9E3779B1u) >> 17; }
+
+static int span3(int a, int b, int c) {
+    int lo = a < b ? a : b, hi = a > b ? a : b;
+    return (hi > c ? hi : c) - (lo < c ? lo : c);
+}
 
 static void resolve_frame(OpList *l) {
     vc_gen++;
@@ -463,9 +470,13 @@ static void resolve_frame(OpList *l) {
                 if (vc[h].gen != vc_gen) {
                     vc[h].gen = vc_gen; vc[h].xy = v->xyword; vc[h].ox = o->a[0]; vc[h].oy = o->a[1];
                     vc[h].x = v->x - o->a[0]; vc[h].y = v->y - o->a[1]; vc[h].w = v->w; vc[h].key = v->key;
+                    vc[h].clip = v->clip; vc[h].ambiguous = false;
                     break;
                 }
-                if (vc[h].xy == v->xyword && vc[h].ox == o->a[0] && vc[h].oy == o->a[1]) break;
+                if (vc[h].xy == v->xyword && vc[h].ox == o->a[0] && vc[h].oy == o->a[1]) {
+                    if (vc[h].key != v->key && (vc[h].clip || v->clip)) vc[h].ambiguous = true;
+                    break;
+                }
             }
         }
     }
@@ -483,7 +494,10 @@ static void resolve_frame(OpList *l) {
             uint32_t h = vc_hash(v->xyword, o->a[0], o->a[1]);
             for (int n = 0; n < 16; n++, h = (h + 1) & (VC_SLOTS - 1)) {
                 if (vc[h].gen != vc_gen) break;
-                if (vc[h].xy == v->xyword && vc[h].ox == o->a[0] && vc[h].oy == o->a[1]) { match[k] = (int)h; nmatch++; break; }
+                if (vc[h].xy == v->xyword && vc[h].ox == o->a[0] && vc[h].oy == o->a[1]) {
+                    if (!vc[h].ambiguous) { match[k] = (int)h; nmatch++; }
+                    break;
+                }
             }
         }
         bool sprite = o->p.semi && !o->v[0].precise && !o->v[1].precise && !o->v[2].precise;
@@ -493,11 +507,30 @@ static void resolve_frame(OpList *l) {
             int h = match[k];
             v->x = o->a[0] + vc[h].x; v->y = o->a[1] + vc[h].y; v->key = vc[h].key;
             v->w = vc[h].w;
+            v->clip = vc[h].clip;
             v->precise = true;
         }
-        // perspective needs depth on all three vertices
-        bool all = o->p.textured && o->v[0].precise && o->v[1].precise && o->v[2].precise &&
-                   o->v[0].key && o->v[1].key && o->v[2].key;
+        bool all3 = o->v[0].precise && o->v[1].precise && o->v[2].precise && o->v[0].key && o->v[1].key && o->v[2].key;
+        bool clip = o->v[0].clip || o->v[1].clip || o->v[2].clip;
+        if (clip && (o->v[0].w == 1.0f || o->v[1].w == 1.0f || o->v[2].w == 1.0f)) all3 = false;   // a vertex without depth
+        // A polygon reaching too near the camera is drawn in 3D, cut at the camera plane by the
+        // GPU, when all of it is known; otherwise as on the console, from the clamped positions,
+        // and not at all if those make it too large.
+        if (clip && !all3) {
+            int x[3], y[3];
+            for (int k = 0; k < 3; k++) {
+                HwVertex *v = &o->v[k];
+                x[k] = (int16_t)(v->xyword & 0xFFFF); y[k] = (int16_t)(v->xyword >> 16);
+                if (v->clip) { v->x = (float)x[k]; v->y = (float)y[k]; v->w = 1.0f; v->clip = v->precise = false; }
+            }
+            if (span3(x[0], x[1], x[2]) >= 1024 || span3(y[0], y[1], y[2]) >= 512) {
+                o->type = OP_NONE;
+                continue;
+            }
+            clip = false;
+        }
+        // perspective needs depth on all three vertices (and is how a clipped polygon is drawn)
+        bool all = (o->p.textured || clip) && all3;
         if (!all) for (int k = 0; k < 3; k++) o->v[k].w = 1.0f;
         else for (int k = 0; k < 3; k++) if (o->v[k].w == 1.0f) { for (int j = 0; j < 3; j++) o->v[j].w = 1.0f; break; }
     }
@@ -664,12 +697,12 @@ static void dump_frame(OpList *l) {
     for (int i = 0; i < l->n; i++) {
         Op *o = &l->ops[i];
         if (o->type != OP_TRI) continue;
-        LOG("[hw] %d id=%u kind=%d semi=%d tex=%d depth=%d raw=%d page=%d,%d clut=%d,%d win=%05x area=%d,%d", i, o->p.id,
-            o->p.kind, o->p.semi, o->p.textured, o->p.depth, o->p.raw, o->p.tex_x, o->p.tex_y, o->p.clut_x, o->p.clut_y,
+        LOG("[hw] %d id=%u kind=%d semi=%d/%d tex=%d depth=%d raw=%d page=%d,%d clut=%d,%d win=%05x area=%d,%d", i, o->p.id,
+            o->p.kind, o->p.semi, o->p.semi_mode, o->p.textured, o->p.depth, o->p.raw, o->p.tex_x, o->p.tex_y, o->p.clut_x, o->p.clut_y,
             o->p.texwin, o->a[0], o->a[1]);
         for (int k = 0; k < 3; k++)
             LOG(" (%.3f,%.3f w=%.1f %s uv=%.2f,%.2f)", o->v[k].x - o->a[0], o->v[k].y - o->a[1], o->v[k].w,
-                o->v[k].precise ? "p" : "i", o->v[k].u, o->v[k].v);
+                o->v[k].clip ? "c" : o->v[k].precise ? "p" : "i", o->v[k].u, o->v[k].v);
         LOG("\n");
     }
 }

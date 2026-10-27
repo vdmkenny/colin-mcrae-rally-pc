@@ -49,18 +49,36 @@ void pgxp_mfc2(int rt, int reg, uint32_t value) {
     }
 }
 
+// A screen position loaded back into the GTE (SXY0-2) keeps its precise value.
+void pgxp_lwc2(uint32_t addr, int reg) {
+    uint32_t v = RD32(addr);
+    gte_write_data(reg, v);
+    PgxpVal *s = slot(addr);
+    if (!pgxp_enabled || !s || s->value != v || !s->key) return;
+    int i = reg - 12;
+    pgxp_sxy[i][0] = s->x; pgxp_sxy[i][1] = s->y; pgxp_sxy[i][2] = s->w;
+    pgxp_sxy_key[i] = s->key;
+    pgxp_sxy_valid[i] = true;
+}
+
+void pgxp_lw(int rt, uint32_t addr, uint32_t value) {
+    PgxpVal *s = slot(addr);
+    if (s && s->value == value && s->key) gpr[rt] = *s;
+    else gpr[rt].value = ~value;
+}
+
 void pgxp_sw(uint32_t addr, int rt, uint32_t value) {
     WR32(addr, value);
     PgxpVal *s = slot(addr);
     if (!s) return;
-    if (gpr[rt].value == value) *s = gpr[rt];
+    if (rt && gpr[rt].value == value && gpr[rt].key) *s = gpr[rt];
     else s->value = ~value;
 }
 
 bool pgxp_lookup(uint32_t addr, uint32_t value, float *x, float *y, float *w, uint32_t *key) {
     if (!pgxp_enabled || addr == PGXP_NO_ADDR) return false;
     PgxpVal *s = slot(addr);
-    if (!s || s->value != value) return false;
+    if (!s || s->value != value || !s->key) return false;
     *x = s->x; *y = s->y; *w = s->w; *key = s->key;
     return true;
 }

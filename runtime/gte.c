@@ -9,6 +9,7 @@ static uint8_t RGBC[4];
 static uint16_t OTZ;
 static int16_t IR[4];
 static int16_t SXY[3][2];         // screen fifo
+static bool sxy_clip[3];          // the precise position differs from SXY (see rtp)
 static uint16_t SZ[4];            // z fifo
 static uint8_t RGB[3][4];         // colour fifo
 static uint32_t RES1;
@@ -95,6 +96,7 @@ void gte_write_data(int r, uint32_t v) {
     case 12: case 13: case 14:
         SXY[r - 12][0] = (int16_t)v; SXY[r - 12][1] = (int16_t)(v >> 16);
         pgxp_sxy_valid[r - 12] = false;
+        sxy_clip[r - 12] = false;
         break;
     case 15:
         SXY[0][0] = SXY[1][0]; SXY[0][1] = SXY[1][1];
@@ -106,6 +108,8 @@ void gte_write_data(int r, uint32_t v) {
         pgxp_sxy_valid[1] = false;
         pgxp_sxy_valid[2] = false;
         pgxp_sxy_key[0] = pgxp_sxy_key[1];
+        sxy_clip[0] = sxy_clip[1];
+        sxy_clip[1] = sxy_clip[2] = false;
         break;
     case 16: case 17: case 18: case 19: SZ[r - 16] = (uint16_t)v; break;
     case 20: case 21: case 22:
@@ -269,6 +273,9 @@ static bool push_sxy(int64_t x, int64_t y) {
     pgxp_sxy_key[0] = pgxp_sxy_key[1];
     pgxp_sxy_key[1] = pgxp_sxy_key[2];
     pgxp_sxy_key[2] = 0;
+    sxy_clip[0] = sxy_clip[1];
+    sxy_clip[1] = sxy_clip[2];
+    sxy_clip[2] = false;
     return !clamped;
 }
 
@@ -311,11 +318,15 @@ static void rtp(int v, bool last) {
     if (widescreen_active) sx = OFX + (sx - OFX) * 3 / 4;
     set_mac0(sx); set_mac0(sy);
     bool ok = push_sxy(sx >> 16, sy >> 16);
-    // Precise projection for the high-resolution renderer, when the hardware result was
-    // not saturated anywhere along the way.
+    // Precise projection for the high-resolution renderer. Where the hardware result is
+    // unusable (saturated somewhere along the way, or the vertex too close to or behind the
+    // camera: the near edge of the road), the precise one is kept all the same, as a homogeneous
+    // position whose depth may be negative, and flagged: the renderer clips such polygons at the
+    // camera plane instead of drawing them from the clamped coordinates, or not at all.
     int64_t m1 = x >> 12, m2 = y >> 12;
-    if (ok && div_ok && sf_shift == 12 && m1 >= -0x8000 && m1 <= 0x7FFF && m2 >= -0x8000 && m2 <= 0x7FFF && z > 0) {
+    if (sf_shift == 12) {
         double zf = (double)z / 4096.0;
+        if (zf < 1.0 / 16 && zf > -1.0 / 16) zf = zf < 0 ? -1.0 / 16 : 1.0 / 16;
         double px = (double)x / 4096.0 * H / zf, py = (double)y / 4096.0 * H / zf;
         if (widescreen_active) px *= 0.75;
         pgxp_sxy[2][0] = (float)(OFX / 65536.0 + px);
@@ -323,6 +334,7 @@ static void rtp(int v, bool last) {
         pgxp_sxy[2][2] = (float)zf;
         pgxp_sxy_valid[2] = true;
         pgxp_sxy_key[2] = pgxp_vertex_key(v, V[v][0], V[v][1], V[v][2]);
+        sxy_clip[2] = !(ok && div_ok && m1 >= -0x8000 && m1 <= 0x7FFF && m2 >= -0x8000 && m2 <= 0x7FFF && z > 0);
     }
     if (last) {
         int64_t d = (int64_t)div * DQA + DQB;
@@ -422,6 +434,20 @@ void gte_command(uint32_t op) {
     case 0x06: {   // NCLIP
         int64_t v = (int64_t)SXY[0][0] * SXY[1][1] + (int64_t)SXY[1][0] * SXY[2][1] + (int64_t)SXY[2][0] * SXY[0][1]
                   - (int64_t)SXY[0][0] * SXY[2][1] - (int64_t)SXY[1][0] * SXY[0][1] - (int64_t)SXY[2][0] * SXY[1][1];
+        // With a vertex too near or behind the camera the clamped coordinates can face either
+        // way; the facing of the real triangle decides (the sign of the homogeneous determinant:
+        // the screen-space winding times the signs of the depths). Only the sign changes.
+        if (render_cfg.hw && pgxp_enabled && (sxy_clip[0] || sxy_clip[1] || sxy_clip[2]) &&
+            pgxp_sxy_valid[0] && pgxp_sxy_valid[1] && pgxp_sxy_valid[2]) {
+            const float (*p)[3] = pgxp_sxy;
+            double c = ((double)p[1][0] - p[0][0]) * ((double)p[2][1] - p[0][1]) - ((double)p[2][0] - p[0][0]) * ((double)p[1][1] - p[0][1]);
+            if (p[0][2] < 0) c = -c;
+            if (p[1][2] < 0) c = -c;
+            if (p[2][2] < 0) c = -c;
+            int64_t m = v < 0 ? -v : v;
+            if (m == 0) m = 1;
+            v = c > 0 ? m : c < 0 ? -m : 0;
+        }
         set_mac0(v);
         break;
     }

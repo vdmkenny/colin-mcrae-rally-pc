@@ -46,7 +46,6 @@ class Module:
         self.extra = extra_entries
         self.cache = {}
         self.warnings = []
-        self.pgxp_regs = set()
         self.track_prov = False
         self.hooks = {}
         self.smc = {}
@@ -414,9 +413,12 @@ def emit_insn(m, i, out):
         setr(i.rt, f"{rs} ^ {imm}")
     elif o == "lui":
         setr(i.rt, f"{imm} << 16" if dyn else f"0x{i.imm << 16:x}u")
-    elif o == "lw" and m.track_prov and i.rt:
-        # remember where the value came from: it may become a GTE input vertex
-        out.append(f"{{ uint32_t a = {addr}; R({i.rt}) = RD32(a); pgxp_prov({i.rt}, a, R({i.rt})); }}")
+    elif o == "lw" and i.rt:
+        # Precise screen positions follow every word loaded and stored (the game copies them
+        # through the stack and between buffers, notably when it splits polygons near the
+        # camera); and where the value came from is remembered when it may become a GTE input.
+        prov = f" pgxp_prov({i.rt}, a, R({i.rt}));" if m.track_prov else ""
+        out.append(f"{{ uint32_t a = {addr}; R({i.rt}) = RD32(a);{prov} pgxp_lw({i.rt}, a, R({i.rt})); }}")
     elif o in ("lb", "lbu", "lh", "lhu", "lw"):
         fn = {"lb": "(uint32_t)(int8_t)RD8", "lbu": "RD8", "lh": "(uint32_t)(int16_t)RD16",
               "lhu": "RD16", "lw": "RD32"}[o]
@@ -433,10 +435,7 @@ def emit_insn(m, i, out):
     elif o == "sh":
         out.append(f"WR16({addr}, {rt});")
     elif o == "sw":
-        if i.rt in m.pgxp_regs:
-            out.append(f"pgxp_sw({addr}, {i.rt}, {rt});")
-        else:
-            out.append(f"WR32({addr}, {rt});")
+        out.append(f"pgxp_sw({addr}, {i.rt}, {rt});")
     elif o == "swl":
         out.append(f"op_swl({addr}, {rt});")
     elif o == "swr":
@@ -460,7 +459,9 @@ def emit_insn(m, i, out):
     elif o == "ctc2":
         out.append(f"gte_write_ctrl({i.rd}, {rt});")
     elif o == "lwc2":
-        if i.rt in (0, 2, 4):
+        if 12 <= i.rt <= 14:
+            out.append(f"pgxp_lwc2({addr}, {i.rt});")
+        elif i.rt in (0, 2, 4):
             out.append(f"{{ uint32_t a = {addr}; gte_write_data({i.rt}, RD32(a)); pgxp_vsrc_addr({i.rt >> 1}, a); }}")
         else:
             out.append(f"gte_write_data({i.rt}, RD32({addr}));")
@@ -510,8 +511,6 @@ def gen_function(m, entry, protos):
         return [f"void {m.fname(entry)}(CPU *c) {{ R(9) = 0x{stub[1]:x}; bios_call(c, 0x{stub[0]:x}, 0x{stub[1]:x}); }}"]
     body, tables = m.walk(entry)
     addrs = sorted(body)
-    # registers that may carry precise screen coordinates (mfc2 from SXY0-2/SXYP)
-    m.pgxp_regs = {m.insn(a).rt for a in addrs if m.insn(a).op == "mfc2" and 12 <= m.insn(a).rd <= 15}
     m.track_prov = any(m.insn(a).op == "mtc2" and m.insn(a).rd in (0, 2, 4) for a in addrs)
 
     # A delay slot is "owned" by the branch before it and emitted together with it.

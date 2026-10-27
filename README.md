@@ -20,7 +20,11 @@ This is an unofficial fan project, not affiliated with Codemasters or Sony.
 - Native-resolution rendering: every primitive is redrawn at the window's pixel resolution
   in true colour (up to 16x the original 320x240)
 - Sub-pixel vertex precision and perspective-correct texturing (no polygon wobble or
-  texture warping), from the GTE's unrounded results
+  texture warping), from the GTE's unrounded results, followed through every copy the game
+  makes of them
+- Polygons reaching past the camera (the near edge of the road, fence posts, trees beside the
+  car) are clipped at the camera plane by the GPU; the console clamps their corners to
+  the screen edge, which left wedges, tears and holes near the bottom of the screen
 - 16:9 widescreen in races (default): wider 3D field of view, HUD kept at its original
   proportions and anchored to the screen edges; menus and videos are shown pillarboxed
 - Bilinear texture filtering (default), kept inside each primitive's texture region so
@@ -32,7 +36,7 @@ This is an unofficial fan project, not affiliated with Codemasters or Sony.
 - 60 fps races: the game simulates a fixed 1/30 s per frame, so the race loop runs every
   vblank but the game's update only every second one; the frames in between draw the scene
   half way between the last two updates, interpolating the transforms of the game's own scene
-  graph (car, wheels, camera), so motion is smooth and the simulation, handling and stage
+  graph (car, wheels, camera) and moving the car shadows along, so motion is smooth and the simulation, handling and stage
   times are exactly those of 30 fps. Controllers are read on update frames only, so a press is
   never missed. Costs one vblank (17 ms) of latency; `--no-race-60fps` or `race_60fps = 0`
   restores 30 fps. Rally School stays at 30 fps
@@ -170,8 +174,11 @@ Settings and memory cards live in the user preferences folder
   spirv-cross) into `runtime/gpu_shaders.h`, which is committed, so building the game does
   not need those tools. `SDL_GPU_DRIVER=vulkan` forces Vulkan where Metal is the default
   (macOS with MoltenVK installed); `runtime/pgxp.c` carries precise vertex positions and vertex identities from the
-  GTE (and from where each input vertex was loaded) to the renderer, which uses them for
-  wobble-free geometry.
+  GTE (and from where each input vertex was loaded) to the renderer, through every word the
+  recompiled code loads and stores, which uses them for wobble-free geometry. Vertices the
+  GTE can only clamp (too near or behind the camera) keep their true depth, so the renderer
+  draws those polygons in 3D and the GPU cuts them at the camera plane; the game's own
+  backface test (NCLIP) then uses the true facing.
 - `ghidra/` holds the headless Ghidra scripts used to produce the function lists.
 
 ## Status

@@ -129,10 +129,75 @@ static bool lerp_xform(const int32_t *a, const int32_t *b, double t, int32_t *ou
     return true;
 }
 
+// Car shadows are not in the scene graph: while drawing, the game works out each car's shadow
+// from its physics state as up to 11 points on the ground in world space (0x88-byte records from
+// 0x800d5de0, the record of car i numbered by the byte at 0x800d68cc + 0x64c * i). On a frame
+// drawn between two updates the shadow would be where the car is after the update, half a step
+// ahead of the interpolated car and mostly hidden under it; it is moved along with the car.
+#define NUM_CARS 0x800c6f9cu
+#define CAR_SHADOW_IDX 0x800d68ccu
+#define SHADOWS 0x800d5de0u
+#define MAX_SHADOWS 8
+#define SHADOW_WORDS 33
+static struct { uint32_t addr; int32_t p[SHADOW_WORDS]; } shadow_true[MAX_SHADOWS];
+static int nshadow;
+
 static void restore(void) {
     if (!restore_pending) return;
     restore_pending = false;
     for (int i = 0; i < nsnap[cur]; i++) write_local(snap[cur][i].addr, snap[cur][i].local);
+    for (int i = 0; i < nshadow; i++)
+        for (int k = 0; k < SHADOW_WORDS; k++) WR32(shadow_true[i].addr + 4 * k, (uint32_t)shadow_true[i].p[k]);
+    nshadow = 0;
+}
+
+// game: draws the shadow of every car.
+int hook_draw_shadows(CPU *c) {
+    (void)c;
+    if (!restore_pending) return 0;   // not an interpolated frame
+    int cars = (int32_t)RD32(NUM_CARS);
+    uint32_t root = RD32(SCENE_ROOT);
+    for (int i = 0; i < cars && nshadow < MAX_SHADOWS; i++) {
+        uint32_t a = SHADOWS + (int8_t)RD8(CAR_SHADOW_IDX + 0x64c * i) * 0x88;
+        int32_t p[SHADOW_WORDS];
+        for (int k = 0; k < SHADOW_WORDS; k++) p[k] = (int32_t)RD32(a + 4 * k);
+        // the car: the object at the top of the scene graph nearest to the shadow's first four
+        // points, always in use (its true transform as of the update, and the interpolated one
+        // it is drawn with)
+        double cx = ((double)p[0] + p[3] + p[6] + p[9]) / 4, cy = ((double)p[1] + p[4] + p[7] + p[10]) / 4;
+        double cz = ((double)p[2] + p[5] + p[8] + p[11]) / 4;
+        const ObjXform *best = NULL;
+        double best_d = 8.0 * 65536 * 8.0 * 65536;
+        for (uint32_t o = root ? RD32(root + 8) : 0, guard = 0; o && guard < MAX_OBJ; o = RD32(o + 4), guard++) {
+            for (int j = 0; j < nsnap[cur]; j++) {
+                if (snap[cur][j].addr != o) continue;
+                const int32_t *t = &snap[cur][j].local[9];
+                double dx = cx - t[0], dy = cy - t[1], dz = cz - t[2];
+                double d = dx * dx + dy * dy + dz * dz;
+                if (d < best_d) { best_d = d; best = &snap[cur][j]; }
+                break;
+            }
+        }
+        if (!best) continue;
+        shadow_true[nshadow].addr = a;
+        memcpy(shadow_true[nshadow].p, p, sizeof p);
+        nshadow++;
+        // world = M * local + t (16.16): back into the car's frame with the true transform, out
+        // with the interpolated one
+        double mt[9], mm[9], tt[3], tm[3];
+        for (int k = 0; k < 9; k++) {
+            mt[k] = best->local[k] / 65536.0;
+            mm[k] = (int32_t)RD32(best->addr + 0x48 + 4 * k) / 65536.0;
+        }
+        for (int k = 0; k < 3; k++) { tt[k] = best->local[9 + k]; tm[k] = (int32_t)RD32(best->addr + 0x6c + 4 * k); }
+        for (int k = 0; k + 2 < SHADOW_WORDS; k += 3) {
+            double d[3] = { p[k] - tt[0], p[k + 1] - tt[1], p[k + 2] - tt[2] }, l[3];
+            for (int r = 0; r < 3; r++) l[r] = mt[r] * d[0] + mt[3 + r] * d[1] + mt[6 + r] * d[2];   // transpose
+            for (int r = 0; r < 3; r++)
+                WR32(a + 4 * (k + r), (uint32_t)(int32_t)lround(tm[r] + mm[r * 3] * l[0] + mm[r * 3 + 1] * l[1] + mm[r * 3 + 2] * l[2]));
+        }
+    }
+    return 0;
 }
 
 // game: polls the controllers at the start of each main loop iteration; "newly pressed" is what

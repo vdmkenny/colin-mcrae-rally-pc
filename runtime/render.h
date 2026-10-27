@@ -12,6 +12,8 @@ typedef struct {
     uint32_t key;    // identity of a GTE-projected vertex (0 = none)
     uint32_t xyword; // the integer screen position word the game supplied
     bool precise;    // x/y came from the GTE (or are exact for 2D primitives)
+    bool clip;       // precise, but the game's integer position is clamped (vertex too near or
+                     // behind the camera): w is the true depth, possibly negative
 } HwVertex;
 
 enum { PRIM_POLY, PRIM_2D, PRIM_SPRITE_3D };

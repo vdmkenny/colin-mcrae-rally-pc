@@ -5,6 +5,7 @@
 // colour, with sub-pixel vertex positions and perspective-correct texturing when the GTE
 // supplied precise coordinates. Textures are sampled from a 1x copy of VRAM in the shader.
 #include "render.h"
+#include "pgxp.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_opengl.h>
 #include <stddef.h>
@@ -252,10 +253,12 @@ static GLuint tex_vram;                   // 1x VRAM, R16UI
 static GLuint tex_hi, fbo_hi;             // high-resolution VRAM
 static GLuint tex_tmp, fbo_tmp;           // scratch for VRAM-to-VRAM copies
 static GLuint tex_disp;                   // 24-bit / software display path
+static GLuint tex_interp, fbo_interp;     // in-between frame
+static GLuint target_fbo;                 // where drawing goes (fbo_hi, or fbo_interp while replaying)
 static int scale = 1;
 static bool vram_dirty = true;
 
-RenderConfig render_cfg = {.hw = true, .filter = false, .widescreen = false, .scale = 0};
+RenderConfig render_cfg = {.hw = true, .filter = false, .widescreen = false, .scale = 0, .interpolate = true};
 
 // current batch state
 static struct { int blend; int x1, y1, x2, y2; } bstate, pending;
@@ -295,7 +298,7 @@ static void upload_vram(void) {
 }
 
 static void bind_hi(void) {
-    GLF(glBindFramebuffer)(GL_FRAMEBUFFER, fbo_hi);
+    GLF(glBindFramebuffer)(GL_FRAMEBUFFER, target_fbo ? target_fbo : fbo_hi);
     GLF(glViewport)(0, 0, 1024 * scale, 512 * scale);
 }
 
@@ -330,6 +333,7 @@ static void begin_prim(int blend, int verts_needed) {
     bstate = pending;
 }
 
+// ------------------------------------------------------------ immediate drawing
 void hw_set_draw_area(int x1, int y1, int x2, int y2) {
     pending.x1 = x1; pending.y1 = y1; pending.x2 = x2; pending.y2 = y2;
 }
@@ -349,8 +353,7 @@ static void push(const HwVertex *v, const HwPrim *p, uint32_t pass) {
                (p->textured && render_cfg.filter && p->filterable ? 64u : 0);
 }
 
-void hw_triangle(const HwVertex v[3], const HwPrim *p) {
-    if (!render_cfg.hw || !ctx) return;
+static void draw_tri(const HwVertex v[3], const HwPrim *p) {
     if (p->textured) {
         float umin = v[0].u, umax = v[0].u, vmin = v[0].v, vmax = v[0].v;
         for (int i = 1; i < 3; i++) {
@@ -375,16 +378,14 @@ void hw_triangle(const HwVertex v[3], const HwPrim *p) {
     }
 }
 
-void hw_fill(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b) {
-    if (!render_cfg.hw || !ctx) return;
+static void draw_fill(int x, int y, int w, int h, uint32_t rgb) {
     flush();
     bind_hi();
     GLF(glEnable)(GL_SCISSOR_TEST);
     GLF(glScissor)(x * scale, y * scale, w * scale, h * scale);
-    GLF(glClearColor)(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
+    GLF(glClearColor)((rgb & 255) / 255.0f, ((rgb >> 8) & 255) / 255.0f, ((rgb >> 16) & 255) / 255.0f, 1.0f);
     GLF(glClear)(GL_COLOR_BUFFER_BIT);
     GLF(glDisable)(GL_SCISSOR_TEST);
-    vram_dirty = true;
 }
 
 static void blit_from_vram(int x, int y, int w, int h) {
@@ -400,13 +401,19 @@ static void blit_from_vram(int x, int y, int w, int h) {
     GLF(glDrawArrays)(GL_TRIANGLES, 0, 6);
 }
 
-// A CPU-to-VRAM transfer finished (vram[] already holds the data).
-void hw_upload(int x, int y, int w, int h) {
-    if (!ctx) return;
-    vram_dirty = true;
-    if (!render_cfg.hw) return;
+// Draws CPU-transferred pixels (as they were at transfer time) into the target.
+static void draw_upload(int x, int y, int w, int h, const uint16_t *pixels) {
     flush();
     upload_vram();
+    if (pixels && x + w <= 1024 && y + h <= 512) {
+        GLF(glActiveTexture)(GL_TEXTURE0);
+        GLF(glBindTexture)(GL_TEXTURE_2D, tex_vram);
+        GLF(glPixelStorei)(GL_UNPACK_ALIGNMENT, 2);
+        GLF(glTexSubImage2D)(GL_TEXTURE_2D, 0, x, y, w, h, GL_RED_INTEGER, GL_UNSIGNED_SHORT, pixels);
+        blit_from_vram(x, y, w, h);
+        vram_dirty = true;   // restore current VRAM contents before the next texture use
+        return;
+    }
     // wrap-around uploads are split into up to four rectangles
     int w1 = x + w > 1024 ? 1024 - x : w, h1 = y + h > 512 ? 512 - y : h;
     blit_from_vram(x, y, w1, h1);
@@ -415,10 +422,8 @@ void hw_upload(int x, int y, int w, int h) {
     if (w1 < w && h1 < h) blit_from_vram(0, 0, w - w1, h - h1);
 }
 
-void hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
-    if (!ctx) return;
-    vram_dirty = true;
-    if (!render_cfg.hw) return;
+static void draw_copy(int sx, int sy, int dx, int dy, int w, int h) {
+    GLuint dst = target_fbo ? target_fbo : fbo_hi;
     flush();
     if (sx + w > 1024 || dx + w > 1024 || sy + h > 512 || dy + h > 512) {
         // rare wrapping copy: rebuild the destination from 1x VRAM
@@ -426,31 +431,336 @@ void hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
         blit_from_vram(dx, dy, w < 1024 - dx ? w : 1024 - dx, h < 512 - dy ? h : 512 - dy);
         return;
     }
-    GLF(glBindFramebuffer)(GL_READ_FRAMEBUFFER, fbo_hi);
+    GLF(glBindFramebuffer)(GL_READ_FRAMEBUFFER, dst);
     GLF(glBindFramebuffer)(GL_DRAW_FRAMEBUFFER, fbo_tmp);
     GLF(glBlitFramebuffer)(sx * scale, sy * scale, (sx + w) * scale, (sy + h) * scale, 0, 0, w * scale, h * scale,
                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
     GLF(glBindFramebuffer)(GL_READ_FRAMEBUFFER, fbo_tmp);
-    GLF(glBindFramebuffer)(GL_DRAW_FRAMEBUFFER, fbo_hi);
+    GLF(glBindFramebuffer)(GL_DRAW_FRAMEBUFFER, dst);
     GLF(glBlitFramebuffer)(0, 0, w * scale, h * scale, dx * scale, dy * scale, (dx + w) * scale, (dy + h) * scale,
                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
     GLF(glBindFramebuffer)(GL_FRAMEBUFFER, 0);
 }
 
+// ------------------------------------------------------------ frame recording
+// High-resolution drawing is deferred: operations are recorded and rendered at the display
+// flip, or earlier when the area being drawn is on screen. The game only ever sees the 1x
+// software VRAM, so this is invisible to it. Seeing the whole frame first allows
+//  - giving vertices the CPU copied from GTE results the precise position of the original
+//    (closes seams between polygons), and
+//  - replaying the frame with interpolated vertices to make an in-between frame.
+typedef enum { OP_TRI, OP_FILL, OP_UPLOAD, OP_COPY } OpType;
+typedef struct {
+    uint8_t type;
+    HwVertex v[3];
+    HwPrim p;
+    int a[6];           // draw area (x1,y1,x2,y2) for triangles; rectangle/colour for other ops
+    uint16_t *pixels;   // uploads: the transferred data
+} Op;
+
+typedef struct { Op *ops; int n, cap; } OpList;
+static OpList frame_ops, prev_ops;
+static bool frame_has_keys;
+
+static Op *record(OpType t) {
+    if (frame_ops.n == frame_ops.cap) {
+        frame_ops.cap = frame_ops.cap ? frame_ops.cap * 2 : 4096;
+        frame_ops.ops = realloc(frame_ops.ops, sizeof(Op) * (size_t)frame_ops.cap);
+    }
+    Op *o = &frame_ops.ops[frame_ops.n++];
+    o->type = (uint8_t)t;
+    o->pixels = NULL;
+    return o;
+}
+
+static void clear_ops(OpList *l) {
+    for (int i = 0; i < l->n; i++) free(l->ops[i].pixels);
+    l->n = 0;
+}
+
+void hw_triangle(const HwVertex v[3], const HwPrim *p) {
+    if (!render_cfg.hw || !ctx) return;
+    Op *o = record(OP_TRI);
+    memcpy(o->v, v, sizeof o->v);
+    o->p = *p;
+    o->a[0] = pending.x1; o->a[1] = pending.y1; o->a[2] = pending.x2; o->a[3] = pending.y2;
+    if (v[0].key || v[1].key || v[2].key) frame_has_keys = true;
+}
+
+void hw_fill(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b) {
+    if (!ctx) return;
+    vram_dirty = true;
+    if (!render_cfg.hw) return;
+    Op *o = record(OP_FILL);
+    o->a[0] = x; o->a[1] = y; o->a[2] = w; o->a[3] = h; o->a[4] = r | (g << 8) | (b << 16);
+}
+
+// A CPU-to-VRAM transfer finished (vram[] already holds the data).
+void hw_upload(int x, int y, int w, int h) {
+    if (!ctx) return;
+    vram_dirty = true;
+    if (!render_cfg.hw) return;
+    Op *o = record(OP_UPLOAD);
+    o->a[0] = x; o->a[1] = y; o->a[2] = w; o->a[3] = h;
+    if (x + w <= 1024 && y + h <= 512) {
+        o->pixels = malloc((size_t)w * h * 2);
+        for (int j = 0; j < h; j++) memcpy(o->pixels + j * w, vram + (y + j) * 1024 + x, (size_t)w * 2);
+    }
+}
+
+void hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
+    if (!ctx) return;
+    vram_dirty = true;
+    if (!render_cfg.hw) return;
+    Op *o = record(OP_COPY);
+    o->a[0] = sx; o->a[1] = sy; o->a[2] = dx; o->a[3] = dy; o->a[4] = w; o->a[5] = h;
+}
+
 void hw_vram_changed(void) { vram_dirty = true; }
+
+// Whole-frame vertex cache: vertices without precise data take the precise position of a
+// GTE vertex at the same integer screen position in the same drawing area.
+#define VC_SLOTS 32768
+static struct { uint32_t xy, gen; int ox, oy; float x, y, w; uint32_t key; } vc[VC_SLOTS];
+static uint32_t vc_gen = 1;
+
+static uint32_t vc_hash(uint32_t xy, int ox, int oy) { return ((xy ^ (uint32_t)(ox * 131 + oy * 7919)) * 0x9E3779B1u) >> 17; }
+
+static void resolve_frame(OpList *l) {
+    vc_gen++;
+    for (int i = 0; i < l->n; i++) {
+        Op *o = &l->ops[i];
+        if (o->type != OP_TRI) continue;
+        for (int k = 0; k < 3; k++) {
+            HwVertex *v = &o->v[k];
+            if (!v->precise || !v->key) continue;
+            uint32_t h = vc_hash(v->xyword, o->a[0], o->a[1]);
+            for (int n = 0; n < 16; n++, h = (h + 1) & (VC_SLOTS - 1)) {
+                if (vc[h].gen != vc_gen) {
+                    vc[h].gen = vc_gen; vc[h].xy = v->xyword; vc[h].ox = o->a[0]; vc[h].oy = o->a[1];
+                    vc[h].x = v->x - o->a[0]; vc[h].y = v->y - o->a[1]; vc[h].w = v->w; vc[h].key = v->key;
+                    break;
+                }
+                if (vc[h].xy == v->xyword && vc[h].ox == o->a[0] && vc[h].oy == o->a[1]) break;
+            }
+        }
+    }
+    for (int i = 0; i < l->n; i++) {
+        Op *o = &l->ops[i];
+        if (o->type != OP_TRI) continue;
+        for (int k = 0; k < 3; k++) {
+            HwVertex *v = &o->v[k];
+            if (v->precise || !pgxp_enabled) continue;
+            uint32_t h = vc_hash(v->xyword, o->a[0], o->a[1]);
+            for (int n = 0; n < 16; n++, h = (h + 1) & (VC_SLOTS - 1)) {
+                if (vc[h].gen != vc_gen) break;
+                if (vc[h].xy == v->xyword && vc[h].ox == o->a[0] && vc[h].oy == o->a[1]) {
+                    v->x = o->a[0] + vc[h].x; v->y = o->a[1] + vc[h].y; v->key = vc[h].key;
+                    v->w = vc[h].w;
+                    v->precise = true;
+                    break;
+                }
+            }
+        }
+        // perspective needs depth on all three vertices
+        bool all = o->p.textured && o->v[0].precise && o->v[1].precise && o->v[2].precise &&
+                   o->v[0].key && o->v[1].key && o->v[2].key;
+        if (!all) for (int k = 0; k < 3; k++) o->v[k].w = 1.0f;
+        else for (int k = 0; k < 3; k++) if (o->v[k].w == 1.0f) { for (int j = 0; j < 3; j++) o->v[j].w = 1.0f; break; }
+    }
+}
+
+// ----------------------------------------------------------- interpolation
+#define MAP_SLOTS 65536
+static struct { uint32_t key; float x, y, w; } vmap[MAP_SLOTS];
+static uint32_t vmap_gen[MAP_SLOTS], map_gen = 1;
+static bool interp_pending, presented_interp;
+static int vblanks_since_flip, last_interval = 2;
+int interp_stat_matched, interp_stat_total, interp_stat_found;
+
+// Positions are stored relative to the drawing area origin: consecutive frames are drawn
+// into different halves of VRAM. A key may occur several times (instanced models, vertices
+// projected once per adjacent polygon strip); lookups pick the nearest occurrence.
+static void map_put(uint32_t key, float x, float y, float w) {
+    uint32_t i = (key * 0x9E3779B1u) >> 16;
+    for (int n = 0; n < 64; n++, i = (i + 1) & (MAP_SLOTS - 1)) {
+        if (vmap_gen[i] != map_gen) {
+            vmap_gen[i] = map_gen; vmap[i].key = key; vmap[i].x = x; vmap[i].y = y; vmap[i].w = w;
+            return;
+        }
+        if (vmap[i].key == key && vmap[i].x == x && vmap[i].y == y) return;
+    }
+}
+
+static bool map_get(uint32_t key, float cx, float cy, float *x, float *y, float *w) {
+    uint32_t i = (key * 0x9E3779B1u) >> 16;
+    float best = 1e30f;
+    for (int n = 0; n < 64; n++, i = (i + 1) & (MAP_SLOTS - 1)) {
+        if (vmap_gen[i] != map_gen) break;
+        if (vmap[i].key != key) continue;
+        float dx = vmap[i].x - cx, dy = vmap[i].y - cy, d = dx * dx + dy * dy;
+        if (d < best) { best = d; *x = vmap[i].x; *y = vmap[i].y; *w = vmap[i].w; }
+    }
+    return best < 1e30f;
+}
+
+static void copy_target(GLuint from, GLuint to) {
+    GLF(glBindFramebuffer)(GL_READ_FRAMEBUFFER, from);
+    GLF(glBindFramebuffer)(GL_DRAW_FRAMEBUFFER, to);
+    GLF(glBlitFramebuffer)(0, 0, 1024 * scale, 512 * scale, 0, 0, 1024 * scale, 512 * scale, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    GLF(glBindFramebuffer)(GL_FRAMEBUFFER, 0);
+}
+
+// Per-vertex motion for the in-between frame, from (in order of preference) the vertex's own
+// match in the previous frame, the average motion of matched vertices nearby (16-pixel grid)
+// for other GTE vertices, and the motion of the rest of the polygon for CPU-built vertices.
+#define GRID_W 64
+#define GRID_H 32
+static float grid_dx[GRID_H][GRID_W], grid_dy[GRID_H][GRID_W];
+static int grid_n[GRID_H][GRID_W];
+typedef struct { float dx, dy, w; uint8_t state; } VMotion;   // 0 none, 1 matched, 2 estimated
+static VMotion *motion;
+static int motion_cap;
+
+static void compute_motion(float alpha) {
+    map_gen++;
+    for (int i = 0; i < prev_ops.n; i++) {
+        Op *o = &prev_ops.ops[i];
+        if (o->type != OP_TRI) continue;
+        for (int k = 0; k < 3; k++)
+            if (o->v[k].key) map_put(o->v[k].key, o->v[k].x - o->a[0], o->v[k].y - o->a[1], o->v[k].w);
+    }
+    if (motion_cap < frame_ops.n * 3) {
+        motion_cap = frame_ops.n * 3 + 1024;
+        motion = realloc(motion, sizeof(VMotion) * (size_t)motion_cap);
+    }
+    memset(grid_n, 0, sizeof grid_n);
+    memset(grid_dx, 0, sizeof grid_dx);
+    memset(grid_dy, 0, sizeof grid_dy);
+    for (int i = 0; i < frame_ops.n; i++) {
+        Op *o = &frame_ops.ops[i];
+        if (o->type != OP_TRI) continue;
+        for (int k = 0; k < 3; k++) {
+            VMotion *m = &motion[i * 3 + k];
+            HwVertex *v = &o->v[k];
+            m->state = 0;
+            if (!v->key) continue;
+            interp_stat_total++;
+            float cx = v->x - o->a[0], cy = v->y - o->a[1], px, py, pw;
+            if (!map_get(v->key, cx, cy, &px, &py, &pw)) continue;
+            interp_stat_found++;
+            float dx = cx - px, dy = cy - py;
+            if (dx * dx + dy * dy > 64.0f * 64.0f) continue;   // probably a different vertex
+            interp_stat_matched++;
+            m->dx = -dx * (1.0f - alpha);
+            m->dy = -dy * (1.0f - alpha);
+            m->w = (v->w != 1.0f && pw != 1.0f) ? pw + (v->w - pw) * alpha : v->w;
+            m->state = 1;
+            int gx = (int)cx >> 4, gy = (int)cy >> 4;
+            if (gx >= 0 && gx < GRID_W && gy >= 0 && gy < GRID_H) {
+                grid_dx[gy][gx] += m->dx; grid_dy[gy][gx] += m->dy; grid_n[gy][gx]++;
+            }
+        }
+    }
+    for (int i = 0; i < frame_ops.n; i++) {
+        Op *o = &frame_ops.ops[i];
+        if (o->type != OP_TRI) continue;
+        bool has_key = o->v[0].key || o->v[1].key || o->v[2].key;
+        for (int k = 0; k < 3; k++) {
+            VMotion *m = &motion[i * 3 + k];
+            HwVertex *v = &o->v[k];
+            // GTE vertices without a match, and CPU-built vertices of 3D polygons
+            if (m->state || !has_key) continue;
+            int gx = (int)(v->x - o->a[0]) >> 4, gy = (int)(v->y - o->a[1]) >> 4;
+            float sx = 0, sy = 0;
+            int n = 0;
+            for (int y = gy - 1; y <= gy + 1; y++)
+                for (int x = gx - 1; x <= gx + 1; x++)
+                    if (x >= 0 && x < GRID_W && y >= 0 && y < GRID_H && grid_n[y][x]) {
+                        sx += grid_dx[y][x]; sy += grid_dy[y][x]; n += grid_n[y][x];
+                    }
+            if (n) { m->dx = sx / n; m->dy = sy / n; m->w = v->w; m->state = 2; }
+        }
+    }
+}
+
+// Renders a recorded frame into `target`, optionally displaced by the motion field.
+static void render_ops(OpList *l, bool moved, GLuint target) {
+    int ax1 = pending.x1, ay1 = pending.y1, ax2 = pending.x2, ay2 = pending.y2;
+    target_fbo = target;
+    for (int i = 0; i < l->n; i++) {
+        Op *o = &l->ops[i];
+        switch (o->type) {
+        case OP_TRI: {
+            HwVertex v[3];
+            memcpy(v, o->v, sizeof v);
+            if (moved) {
+                float sx = 0, sy = 0;
+                int nm = 0;
+                for (int k = 0; k < 3; k++) {
+                    VMotion *m = &motion[i * 3 + k];
+                    if (!m->state) continue;
+                    v[k].x += m->dx; v[k].y += m->dy; v[k].w = m->w;
+                    sx += m->dx; sy += m->dy; nm++;
+                }
+                if (nm && nm < 3)
+                    for (int k = 0; k < 3; k++)
+                        if (!motion[i * 3 + k].state) { v[k].x += sx / nm; v[k].y += sy / nm; }
+            }
+            pending.x1 = o->a[0]; pending.y1 = o->a[1]; pending.x2 = o->a[2]; pending.y2 = o->a[3];
+            draw_tri(v, &o->p);
+            break;
+        }
+        case OP_FILL: draw_fill(o->a[0], o->a[1], o->a[2], o->a[3], (uint32_t)o->a[4]); break;
+        case OP_UPLOAD: draw_upload(o->a[0], o->a[1], o->a[2], o->a[3], o->pixels); break;
+        case OP_COPY: draw_copy(o->a[0], o->a[1], o->a[2], o->a[3], o->a[4], o->a[5]); break;
+        }
+    }
+    flush();
+    target_fbo = 0;
+    pending.x1 = ax1; pending.y1 = ay1; pending.x2 = ax2; pending.y2 = ay2;
+}
+
+// Renders whatever has been recorded so far as a normal (not interpolated) frame.
+static void render_pending(void) {
+    if (!frame_ops.n) return;
+    resolve_frame(&frame_ops);
+    render_ops(&frame_ops, false, fbo_hi);
+    clear_ops(&frame_ops);
+    clear_ops(&prev_ops);
+    frame_has_keys = false;
+}
+
+void hw_flip(void) {
+    if (!ctx || !render_cfg.hw) return;
+    last_interval = vblanks_since_flip < 1 ? 1 : vblanks_since_flip;
+    vblanks_since_flip = 0;
+    resolve_frame(&frame_ops);
+    render_ops(&frame_ops, false, fbo_hi);
+    if (render_cfg.interpolate && last_interval == 2 && frame_has_keys && prev_ops.n) {
+        compute_motion(0.5f);
+        copy_target(fbo_hi, fbo_interp);   // anything left uncovered shows nearly identical pixels
+        render_ops(&frame_ops, true, fbo_interp);
+        interp_pending = true;
+    }
+    clear_ops(&prev_ops);
+    OpList t = prev_ops;
+    prev_ops = frame_ops;
+    frame_ops = t;
+    frame_has_keys = false;
+}
 
 // ------------------------------------------------------------- setup/present
 static void create_targets(void) {
     if (tex_hi) {
-        GLF(glDeleteTextures)(1, &tex_hi);
-        GLF(glDeleteTextures)(1, &tex_tmp);
-        GLF(glDeleteFramebuffers)(1, &fbo_hi);
-        GLF(glDeleteFramebuffers)(1, &fbo_tmp);
+        GLuint t[3] = {tex_hi, tex_tmp, tex_interp}, f[3] = {fbo_hi, fbo_tmp, fbo_interp};
+        GLF(glDeleteTextures)(3, t);
+        GLF(glDeleteFramebuffers)(3, f);
     }
-    GLuint t[2], f[2];
-    GLF(glGenTextures)(2, t);
-    GLF(glGenFramebuffers)(2, f);
-    for (int i = 0; i < 2; i++) {
+    GLuint t[3], f[3];
+    GLF(glGenTextures)(3, t);
+    GLF(glGenFramebuffers)(3, f);
+    for (int i = 0; i < 3; i++) {
         GLF(glBindTexture)(GL_TEXTURE_2D, t[i]);
         GLF(glTexImage2D)(GL_TEXTURE_2D, 0, GL_RGBA8, 1024 * scale, 512 * scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         GLF(glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -463,6 +773,9 @@ static void create_targets(void) {
             host_fatal("GL: framebuffer incomplete at scale %d", scale);
     }
     tex_hi = t[0]; tex_tmp = t[1]; fbo_hi = f[0]; fbo_tmp = f[1];
+    tex_interp = t[2]; fbo_interp = f[2];
+    clear_ops(&frame_ops);
+    clear_ops(&prev_ops);
     // seed the new target with the current 1x VRAM
     vram_dirty = true;
     upload_vram();
@@ -570,6 +883,9 @@ static void viewport(int *x, int *y, int *w, int *h) {
 }
 
 void render_present(const DisplayInfo *d, const uint32_t *rgba_1x) {
+    // Double-buffered games flip every frame; anything that draws without flipping
+    // (loading screens, single-buffered menus) is shown after a short wait.
+    if (render_cfg.hw && (vblanks_since_flip >= 4 || frame_ops.n > 200000)) render_pending();
     flush();
     int vx, vy, vw, vh;
     viewport(&vx, &vy, &vw, &vh);
@@ -582,8 +898,12 @@ void render_present(const DisplayInfo *d, const uint32_t *rgba_1x) {
         GLF(glTexSubImage2D)(GL_TEXTURE_2D, 0, 0, 0, d->w, d->h, GL_RGBA, GL_UNSIGNED_BYTE, rgba_1x);
         draw_present(tex_disp, 0, 0, d->w / 640.0f, d->h / 512.0f, false, vx, vy, vw, vh);
     } else {
-        draw_present(tex_hi, d->x / 1024.0f, d->y / 512.0f, d->w / 1024.0f, d->h / 512.0f, false, vx, vy, vw, vh);
+        GLuint src = interp_pending ? tex_interp : tex_hi;
+        draw_present(src, d->x / 1024.0f, d->y / 512.0f, d->w / 1024.0f, d->h / 512.0f, false, vx, vy, vw, vh);
     }
+    presented_interp = interp_pending;
+    interp_pending = false;
+    vblanks_since_flip++;
     SDL_GL_SwapWindow(win);
     int s = wanted_scale();
     if (s != scale && render_cfg.hw) {
@@ -599,7 +919,7 @@ bool render_read_display(const DisplayInfo *d, uint32_t **out, int *w, int *h) {
     flush();
     *w = d->w * scale; *h = d->h * scale;
     *out = malloc((size_t)*w * *h * 4);
-    GLF(glBindFramebuffer)(GL_READ_FRAMEBUFFER, fbo_hi);
+    GLF(glBindFramebuffer)(GL_READ_FRAMEBUFFER, presented_interp ? fbo_interp : fbo_hi);
     GLF(glPixelStorei)(GL_PACK_ALIGNMENT, 4);
     GLF(glReadPixels)(d->x * scale, d->y * scale, *w, *h, GL_RGBA, GL_UNSIGNED_BYTE, *out);
     GLF(glBindFramebuffer)(GL_FRAMEBUFFER, 0);

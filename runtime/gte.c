@@ -67,11 +67,11 @@ uint32_t gte_read_data(int r) {
 
 void gte_write_data(int r, uint32_t v) {
     switch (r) {
-    case 0: V[0][0] = (int16_t)v; V[0][1] = (int16_t)(v >> 16); break;
+    case 0: V[0][0] = (int16_t)v; V[0][1] = (int16_t)(v >> 16); pgxp_vsrc[0] = 0; break;
     case 1: V[0][2] = (int16_t)v; break;
-    case 2: V[1][0] = (int16_t)v; V[1][1] = (int16_t)(v >> 16); break;
+    case 2: V[1][0] = (int16_t)v; V[1][1] = (int16_t)(v >> 16); pgxp_vsrc[1] = 0; break;
     case 3: V[1][2] = (int16_t)v; break;
-    case 4: V[2][0] = (int16_t)v; V[2][1] = (int16_t)(v >> 16); break;
+    case 4: V[2][0] = (int16_t)v; V[2][1] = (int16_t)(v >> 16); pgxp_vsrc[2] = 0; break;
     case 5: V[2][2] = (int16_t)v; break;
     case 6: RGBC[0] = v; RGBC[1] = v >> 8; RGBC[2] = v >> 16; RGBC[3] = v >> 24; break;
     case 7: OTZ = (uint16_t)v; break;
@@ -89,6 +89,7 @@ void gte_write_data(int r, uint32_t v) {
         pgxp_sxy_valid[0] = pgxp_sxy_valid[1];
         pgxp_sxy_valid[1] = false;
         pgxp_sxy_valid[2] = false;
+        pgxp_sxy_key[0] = pgxp_sxy_key[1];
         break;
     case 16: case 17: case 18: case 19: SZ[r - 16] = (uint16_t)v; break;
     case 20: case 21: case 22:
@@ -241,6 +242,9 @@ static bool push_sxy(int64_t x, int64_t y) {
     pgxp_sxy_valid[0] = pgxp_sxy_valid[1];
     pgxp_sxy_valid[1] = pgxp_sxy_valid[2];
     pgxp_sxy_valid[2] = false;
+    pgxp_sxy_key[0] = pgxp_sxy_key[1];
+    pgxp_sxy_key[1] = pgxp_sxy_key[2];
+    pgxp_sxy_key[2] = 0;
     return !clamped;
 }
 
@@ -294,6 +298,7 @@ static void rtp(int v, bool last) {
         pgxp_sxy[2][1] = (float)(OFY / 65536.0 + py);
         pgxp_sxy[2][2] = (float)zf;
         pgxp_sxy_valid[2] = true;
+        pgxp_sxy_key[2] = pgxp_vertex_key(v, V[v][0], V[v][1], V[v][2]);
     }
     if (last) {
         int64_t d = (int64_t)div * DQA + DQB;
@@ -357,8 +362,25 @@ static void cmd_ncc(int v) {
     finish_color();
 }
 
+#ifdef RECOMP_TRACE
+extern uint32_t trace_stack[1024];
+extern int trace_depth;
+static struct { uint32_t fn, n; } rtp_prof[64];
+void gte_profile_dump(void) {
+    for (int i = 0; i < 64; i++) if (rtp_prof[i].n) LOG("[gte] %08x: %u projections\n", rtp_prof[i].fn, rtp_prof[i].n);
+}
+#endif
+
 void gte_command(uint32_t op) {
     FLAG = 0;
+#ifdef RECOMP_TRACE
+    if (log_level >= 3 && ((op & 0x3F) == 0x01 || (op & 0x3F) == 0x30) && trace_depth > 0 && trace_depth <= 1024) {
+        uint32_t fn = trace_stack[trace_depth - 1];
+        for (int i = 0; i < 64; i++) {
+            if (rtp_prof[i].fn == fn || !rtp_prof[i].n) { rtp_prof[i].fn = fn; rtp_prof[i].n += (op & 0x3F) == 0x30 ? 3 : 1; break; }
+        }
+    }
+#endif
     sf_shift = (op & (1u << 19)) ? 12 : 0;
     lm_flag = (op >> 10) & 1;
     switch (op & 0x3F) {

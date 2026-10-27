@@ -171,6 +171,9 @@ static void handle_events(void) {
             } else if (e.key.scancode == SDL_SCANCODE_F4) {
                 render_cfg.hw = !render_cfg.hw;
                 LOG("[render] %s renderer\n", render_cfg.hw ? "high-resolution" : "original 1x");
+            } else if (e.key.scancode == SDL_SCANCODE_F6) {
+                render_cfg.interpolate = !render_cfg.interpolate;
+                LOG("[render] frame interpolation %s\n", render_cfg.interpolate ? "on" : "off");
             } else if (e.key.scancode == SDL_SCANCODE_F5) {
                 pgxp_enabled = !pgxp_enabled;
                 LOG("[render] precise vertices %s\n", pgxp_enabled ? "on" : "off");
@@ -262,11 +265,18 @@ void host_frame(void) {
     if (opts.shot_every && frame_count % opts.shot_every == 0) save_screenshot();
     if (opts.exit_after && frame_count >= opts.exit_after) {
         if (log_level >= 1) trace_dump();
+#ifdef RECOMP_TRACE
+        extern void gte_profile_dump(void);
+        if (log_level >= 3) gte_profile_dump();
+#endif
         exit(0);
     }
     if (log_level >= 1 && frame_count % 300 == 0) {
         uint64_t now = SDL_GetTicksNS();
-        if (fps_t0) LOG("[host] frame %d, %.1f fps\n", frame_count, 300e9 / (double)(now - fps_t0));
+        extern int interp_stat_matched, interp_stat_total, interp_stat_found;
+        if (fps_t0) LOG("[host] frame %d, %.1f fps, interpolated vertices %d/%d (keys found %d)\n", frame_count,
+                        300e9 / (double)(now - fps_t0), interp_stat_matched, interp_stat_total, interp_stat_found);
+        interp_stat_matched = interp_stat_total = interp_stat_found = 0;
         fps_t0 = now;
     }
     if (!opts.turbo) pace();
@@ -316,6 +326,7 @@ static void apply_setting(const char *k, const char *v) {
     else if (!strcmp(k, "filter")) render_cfg.filter = n;
     else if (!strcmp(k, "widescreen")) render_cfg.widescreen = n;
     else if (!strcmp(k, "pgxp")) pgxp_enabled = n;
+    else if (!strcmp(k, "interpolation")) render_cfg.interpolate = n;
     else if (!strcmp(k, "vsync")) vsync = n;
     else if (!strcmp(k, "dither")) gpu_dither_enabled = n;
     else if (!strcmp(k, "analog")) pad_analog_mode = n;
@@ -345,6 +356,7 @@ static void save_settings(void) {
     fprintf(f, "# Colin McRae Rally PC settings (also changeable with hotkeys and command-line options)\n");
     fprintf(f, "fullscreen = %d\nwindow = %d\nscale = %d\nhires = %d\nfilter = %d\nwidescreen = %d\n",
             opts.fullscreen, opts.scale, render_cfg.scale, render_cfg.hw, render_cfg.filter, render_cfg.widescreen);
+    fprintf(f, "interpolation = %d\n", render_cfg.interpolate);
     fprintf(f, "pgxp = %d\nvsync = %d\ndither = %d\nanalog = %d\ncpu = %u\n", pgxp_enabled, vsync,
             gpu_dither_enabled, pad_analog_mode, cycles_per_insn);
     fclose(f);
@@ -364,6 +376,7 @@ static void usage(void) {
             "  --widescreen        16:9 with a widened 3D projection\n"
             "  --no-pgxp           disable sub-pixel vertex precision (toggle with F5)\n"
             "  --no-vsync          do not sync presentation to the display\n"
+            "  --no-interpolation  show only the game's own frames (30 fps in races)\n"
             "  --log N             debug log level\n"
             "keys: arrows=d-pad X=cross C=circle Z=square S=triangle Q/W=L1/R1 A/D=L2/R2\n"
             "      Enter=start RShift=select Tab=fast-forward F11=fullscreen Shift+Esc=quit\n");
@@ -384,6 +397,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--widescreen")) render_cfg.widescreen = true;
         else if (!strcmp(argv[i], "--no-pgxp")) pgxp_enabled = false;
         else if (!strcmp(argv[i], "--no-vsync")) vsync = false;
+        else if (!strcmp(argv[i], "--no-interpolation")) render_cfg.interpolate = false;
         else if (!strcmp(argv[i], "--interval") && i + 1 < argc) frame_interval_override = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) {
             wav_out = fopen(argv[++i], "wb");

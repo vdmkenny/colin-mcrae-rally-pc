@@ -9,6 +9,9 @@ typedef struct {
     float w;         // 1 for affine; view depth for perspective-correct texturing
     uint8_t r, g, b;
     float u, v;      // texel coordinates
+    uint32_t key;    // vertex identity across frames (0 = none), for frame interpolation
+    uint32_t xyword; // the integer screen position word the game supplied
+    bool precise;    // x/y came from the GTE (or are exact for 2D primitives)
 } HwVertex;
 
 typedef struct {
@@ -29,6 +32,7 @@ typedef struct {
     bool filter;      // bilinear texture filtering
     bool widescreen;  // 16:9 output with the GTE projection widened to match
     int scale;        // internal resolution multiplier, 0 = match the window
+    bool interpolate; // generate in-between frames when the game renders below 60 fps
 } RenderConfig;
 extern RenderConfig render_cfg;
 
@@ -45,3 +49,4 @@ void hw_upload(int x, int y, int w, int h);
 void hw_copy(int sx, int sy, int dx, int dy, int w, int h);
 void hw_vram_changed(void);
 void hw_flush(void);
+void hw_flip(void);   // the game switched the displayed framebuffer

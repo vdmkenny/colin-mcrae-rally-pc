@@ -42,6 +42,7 @@ class Module:
         self.cache = {}
         self.warnings = []
         self.pgxp_regs = set()
+        self.track_prov = False
         self.hooks = {}
 
     def insn(self, a):
@@ -341,6 +342,9 @@ def emit_insn(m, i, out):
         setr(i.rt, f"{rs} ^ 0x{i.imm:x}u")
     elif o == "lui":
         setr(i.rt, f"0x{i.imm << 16:x}u")
+    elif o == "lw" and m.track_prov and i.rt:
+        # remember where the value came from: it may become a GTE input vertex
+        out.append(f"{{ uint32_t a = {addr}; R({i.rt}) = RD32(a); pgxp_prov({i.rt}, a, R({i.rt})); }}")
     elif o in ("lb", "lbu", "lh", "lhu", "lw"):
         fn = {"lb": "(uint32_t)(int8_t)RD8", "lbu": "RD8", "lh": "(uint32_t)(int16_t)RD16",
               "lhu": "RD16", "lw": "RD32"}[o]
@@ -379,10 +383,15 @@ def emit_insn(m, i, out):
         setr(i.rt, f"gte_read_ctrl({i.rd})")
     elif o == "mtc2":
         out.append(f"gte_write_data({i.rd}, {rt});")
+        if i.rd in (0, 2, 4):
+            out.append(f"pgxp_vsrc_reg({i.rd >> 1}, {i.rt}, {rt});")
     elif o == "ctc2":
         out.append(f"gte_write_ctrl({i.rd}, {rt});")
     elif o == "lwc2":
-        out.append(f"gte_write_data({i.rt}, RD32({addr}));")
+        if i.rt in (0, 2, 4):
+            out.append(f"{{ uint32_t a = {addr}; gte_write_data({i.rt}, RD32(a)); pgxp_vsrc_addr({i.rt >> 1}, a); }}")
+        else:
+            out.append(f"gte_write_data({i.rt}, RD32({addr}));")
     elif o == "swc2":
         if 12 <= i.rt <= 15:
             out.append(f"pgxp_swc2({addr}, {i.rt});")
@@ -431,6 +440,7 @@ def gen_function(m, entry, protos):
     addrs = sorted(body)
     # registers that may carry precise screen coordinates (mfc2 from SXY0-2/SXYP)
     m.pgxp_regs = {m.insn(a).rt for a in addrs if m.insn(a).op == "mfc2" and 12 <= m.insn(a).rd <= 15}
+    m.track_prov = any(m.insn(a).op == "mtc2" and m.insn(a).rd in (0, 2, 4) for a in addrs)
 
     # A delay slot is "owned" by the branch before it and emitted together with it.
     slots = set()

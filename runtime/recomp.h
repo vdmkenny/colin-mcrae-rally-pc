@@ -66,6 +66,9 @@ void gte_command(uint32_t op);
 void pgxp_swc2(uint32_t addr, int reg);
 void pgxp_mfc2(int rt, int reg, uint32_t value);
 void pgxp_sw(uint32_t addr, int rt, uint32_t value);
+void pgxp_prov(int rt, uint32_t addr, uint32_t value);
+void pgxp_vsrc_reg(int v, int rt, uint32_t value);
+void pgxp_vsrc_addr(int v, uint32_t addr);
 
 uint32_t mem_read_slow(uint32_t addr, int size);
 void mem_write_slow(uint32_t addr, uint32_t v, int size);

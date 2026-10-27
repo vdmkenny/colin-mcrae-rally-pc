@@ -25,6 +25,7 @@ static bool field_odd;
 bool gpu_dither_enabled = true;
 
 uint32_t gpu_stat_precise, gpu_stat_imprecise;
+uint32_t gpu_mix_stats[3];
 
 // command fifo; cmd_addr holds the RAM address each word came from (DMA) for PGXP lookups
 static uint32_t cmd[16];
@@ -131,7 +132,7 @@ static inline uint16_t modulate(uint16_t texel, int r, int g, int b, int x, int 
 }
 
 // ------------------------------------------------------------- triangles
-typedef struct { int x, y, r, g, b, u, v; float fx, fy, fw; bool precise; } Vtx;
+typedef struct { int x, y, r, g, b, u, v; float fx, fy, fw; bool precise; uint32_t key; uint32_t xy; } Vtx;
 
 enum { F_SHADED = 1, F_TEXTURED = 2, F_SEMI = 4, F_RAW = 8 };
 
@@ -241,14 +242,17 @@ static HwVertex hw_vtx(const Vtx *v, bool perspective) {
     HwVertex h;
     h.x = v->precise ? v->fx : (float)v->x;
     h.y = v->precise ? v->fy : (float)v->y;
-    h.w = perspective ? v->fw : 1.0f;
+    h.w = perspective && v->precise ? v->fw : 1.0f;
     h.r = (uint8_t)v->r; h.g = (uint8_t)v->g; h.b = (uint8_t)v->b;
     h.u = (float)v->u; h.v = (float)v->v;
+    h.key = v->precise ? v->key : 0;
+    h.xyword = v->xy;
+    h.precise = v->precise;
     return h;
 }
 
 static void hw_tri(const Vtx *a, const Vtx *b, const Vtx *c, const HwPrim *p) {
-    bool persp = a->precise && b->precise && c->precise && p->textured;
+    bool persp = p->textured;   // the renderer drops depth unless all three vertices have it
     HwVertex v[3] = {hw_vtx(a, persp), hw_vtx(b, persp), hw_vtx(c, persp)};
     // Same size limit as the hardware: oversized polygons are not drawn at all.
     int minx = a->x < b->x ? a->x : b->x, maxx = a->x > b->x ? a->x : b->x;
@@ -284,7 +288,9 @@ static void cmd_polygon(void) {
         v[i].r = col & 0xFF; v[i].g = (col >> 8) & 0xFF; v[i].b = (col >> 16) & 0xFF;
         v[i].x = sext11(sext11(xy & 0x7FF) + off_x);
         v[i].y = sext11(sext11((xy >> 16) & 0x7FF) + off_y);
-        v[i].precise = pgxp_lookup(xy_addr, xy, &v[i].fx, &v[i].fy, &v[i].fw);
+        v[i].precise = pgxp_lookup(xy_addr, xy, &v[i].fx, &v[i].fy, &v[i].fw, &v[i].key);
+        // the final integer position (after the drawing offset) identifies the vertex on screen
+        v[i].xy = (uint32_t)(uint16_t)v[i].x | ((uint32_t)(uint16_t)v[i].y << 16);
         if (v[i].precise) { v[i].fx += off_x; v[i].fy += off_y; gpu_stat_precise++; }
         else gpu_stat_imprecise++;
         v[i].u = v[i].v = 0;
@@ -304,6 +310,12 @@ static void cmd_polygon(void) {
     if (textured && (texpage & 0x800)) flags &= ~F_TEXTURED;   // texture disable
     draw_triangle(v[0], v[1], v[2], flags, &t);
     if (quad) draw_triangle(v[1], v[2], v[3], flags, &t);
+    {
+        extern uint32_t gpu_mix_stats[3];
+        int np = 0;
+        for (int i = 0; i < n; i++) np += v[i].precise;
+        gpu_mix_stats[np == 0 ? 0 : np == n ? 2 : 1]++;
+    }
     HwPrim hp = hw_prim(&t, flags & F_TEXTURED, raw, semi, true);
     if (!shaded) for (int i = 1; i < n; i++) { v[i].r = v[0].r; v[i].g = v[0].g; v[i].b = v[0].b; }
     hw_tri(&v[0], &v[1], &v[2], &hp);
@@ -326,7 +338,7 @@ static void hw_line(Vtx a, Vtx b, bool shaded, bool semi) {
         q[0].fx = ax; q[0].fy = ay; q[1].fx = bx; q[1].fy = by;
         q[2].fx = ax + 1; q[2].fy = ay; q[3].fx = bx + 1; q[3].fy = by;
     }
-    for (int i = 0; i < 4; i++) q[i].precise = true;
+    for (int i = 0; i < 4; i++) { q[i].precise = true; q[i].key = 0; q[i].xy = 0; }
     TexInfo t = {0};
     HwPrim p = hw_prim(&t, false, false, semi, false);
     hw_tri(&q[0], &q[1], &q[2], &p);
@@ -384,7 +396,7 @@ static void draw_rect(int x0, int y0, int w, int h, uint32_t col, int u0, int v0
         float ys[4] = {(float)y0, (float)y0, (float)(y0 + h), (float)(y0 + h)};
         float us[4] = {ua, ub, ua, ub}, vs[4] = {va, va, vb, vb};
         for (int i = 0; i < 4; i++) {
-            q[i] = (Vtx){x0, y0, r, g, b, 0, 0, xs[i], ys[i], 1.0f, true};
+            q[i] = (Vtx){x0, y0, r, g, b, 0, 0, xs[i], ys[i], 1.0f, true, 0, 0};
         }
         HwPrim p = hw_prim(&t, textured, raw, semi, false);
         p.semi_mode = semi_mode;
@@ -633,7 +645,11 @@ void gpu_gp1(uint32_t v) {
     case 0x03: disp_enabled = !(v & 1); break;
     case 0x04: dma_dir = v & 3; break;
     case 0x05:
-        if ((v & 0x3FE) != disp_x || ((v >> 10) & 0x1FF) != disp_y) gpu_stat_flips++;
+        if ((v & 0x3FE) != disp_x || ((v >> 10) & 0x1FF) != disp_y) {
+            gpu_stat_flips++;
+            hw_flip();
+            pgxp_new_frame();
+        }
         disp_x = v & 0x3FE; disp_y = (v >> 10) & 0x1FF;
         break;
     case 0x06: disp_h1 = v & 0xFFF; disp_h2 = (v >> 12) & 0xFFF; break;
@@ -694,6 +710,8 @@ void gpu_vblank(void) {
     hw_vram_changed();
     static int n;
     if (log_level >= 1 && ++n % 60 == 0) {
+        LOG("[gpu] polys none/mixed/all precise=%u/%u/%u ", gpu_mix_stats[0], gpu_mix_stats[1], gpu_mix_stats[2]);
+        gpu_mix_stats[0] = gpu_mix_stats[1] = gpu_mix_stats[2] = 0;
         LOG("[gpu] precise=%u/%u flips=%u prims=%u uploads=%u fills=%u disp=%s mode=%02x at %u,%u range v%u-%u\n", gpu_stat_precise, gpu_stat_precise + gpu_stat_imprecise, gpu_stat_flips, gpu_stat_prims,
             gpu_stat_uploads, gpu_stat_fills, disp_enabled ? "on" : "off", disp_mode, disp_x, disp_y, disp_v1, disp_v2);
         gpu_stat_prims = gpu_stat_uploads = gpu_stat_fills = gpu_stat_flips = 0;

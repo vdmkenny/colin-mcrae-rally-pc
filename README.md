@@ -9,6 +9,12 @@ No game data is included or distributed: you build the port from your own disc i
 the recompiled code (`generated/`) is derived from it, so it is not part of this repository.
 This is an unofficial fan project, not affiliated with Codemasters or Sony.
 
+> **A quick and dirty LLM port.** Nearly all of the code, tooling and documentation here was
+> written by an LLM coding agent in a short time, with little human review of the code. It
+> was checked by running the game (scripted runs, screenshots, comparisons between renderers
+> and builds), not by reading every line. Expect rough edges, hacks and code that would not
+> pass a careful review; treat it as an experiment rather than a reference implementation.
+
 ## Features
 
 - Native-resolution rendering: every primitive is redrawn at the window's pixel resolution

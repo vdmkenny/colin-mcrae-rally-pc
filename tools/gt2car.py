@@ -242,29 +242,34 @@ def cross(a, b):
 def triangles(lod, dy, transparent):
     """GT2 faces as game-axis triangles: [(corners [(position, normal)], uvs, palette, colour,
     decal)]. GT2 winds every face outward the same way, which the change of axes mirrors.
-    Corners whose smoothed normals point inward get the face's own. A decal (a lamp) is drawn
-    over another face on the same corners: the one with transparent texels, else the first."""
+    A decal (a lamp) is drawn over another face on the same corners: the one with transparent
+    texels, else the first. The face under a decal takes the decal's normals (GT2 gives it a
+    placeholder), and corners whose normals point inward get the face's own."""
     out = []
     verts = [to_game(v, dy) for v in lod["vertices"]]
-    corners = collections.Counter(tuple(sorted(f["verts"])) for f in lod["faces"])
-    first = set()
+    twins = collections.defaultdict(list)
     for f in lod["faces"]:
-        key = tuple(sorted(f["verts"]))
-        decal = False
-        if corners[key] > 1:
-            twins = [g for g in lod["faces"] if tuple(sorted(g["verts"])) == key]
-            holes = [transparent(g) for g in twins]
-            decal = transparent(f) if any(holes) and not all(holes) else key not in first
-            first.add(key)
+        twins[tuple(sorted(f["verts"]))].append(f)
+    decals = set()
+    for fs in twins.values():
+        if len(fs) > 1:
+            holes = [f for f in fs if transparent(f)]
+            decals.add(id(holes[0] if holes and len(holes) < len(fs) else fs[0]))
+    for f in lod["faces"]:
+        normals = dict(zip(f["verts"], f["normals"]))
+        cover = [g for g in twins[tuple(sorted(f["verts"]))] if id(g) in decals and g is not f]
+        if cover and id(f) not in decals:
+            normals = dict(zip(cover[0]["verts"], cover[0]["normals"]))
         order = [(0, 2, 1), (0, 3, 2)] if len(f["verts"]) == 4 else [(0, 2, 1)]
         for t in order:
-            pos = [verts[f["verts"][i]] for i in t]
+            vi = [f["verts"][i] for i in t]
+            pos = [verts[i] for i in vi]
             face_n = norm(cross([b - a for a, b in zip(pos[0], pos[1])], [b - a for a, b in zip(pos[0], pos[2])]))
-            ns = [norm(to_game(f["normals"][i])) if f["normals"][i] else face_n for i in t]
+            ns = [norm(to_game(normals[i])) if normals[i] else face_n for i in vi]
             if sum(sum(a * b for a, b in zip(face_n, n)) for n in ns) < 0:
                 ns = [face_n] * 3
             uvs = [f["uvs"][i] for i in t] if f["uvs"] else None
-            out.append((list(zip(pos, ns)), uvs, f["palette"], f["colour"], decal))
+            out.append((list(zip(pos, ns)), uvs, f["palette"], f["colour"], id(f) in decals))
     return out
 
 

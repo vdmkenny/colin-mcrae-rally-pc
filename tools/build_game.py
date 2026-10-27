@@ -90,11 +90,20 @@ def main():
     if sys.platform == "darwin" and os.path.isdir("/opt/homebrew/opt/sdl3"):
         cmake.append("-DCMAKE_PREFIX_PATH=/opt/homebrew/opt/sdl3")
     subprocess.check_call(cmake)
-    subprocess.check_call(["cmake", "--build", args.build_dir, "--parallel"])
+    subprocess.check_call(["cmake", "--build", args.build_dir, "--parallel", "--config", args.config])
 
-    with open(os.path.join(args.build_dir, "disc_path.txt"), "w") as f:
+    # single-config generators put the program in the build directory, Visual Studio in a
+    # per-configuration subdirectory; the disc location goes next to it
+    exe = None
+    for sub in ("", args.config):
+        for name in ("cmrally", "cmrally.exe"):
+            candidate = os.path.join(args.build_dir, sub, name)
+            if os.path.isfile(candidate):
+                exe = candidate
+    if not exe:
+        sys.exit("build finished but the cmrally executable was not found")
+    with open(os.path.join(os.path.dirname(exe), "disc_path.txt"), "w") as f:
         f.write(os.path.abspath(args.cue) + "\n")
-    exe = os.path.join(args.build_dir, "cmrally")
     print(f"\nDone. Run: {exe}")
 
 

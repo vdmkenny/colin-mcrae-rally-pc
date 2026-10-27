@@ -37,7 +37,8 @@ static int cmd_len, cmd_need;
 static bool polyline;
 
 // VRAM transfers
-static struct { int x, y, w, h, cx, cy; bool active; } upload, download;
+typedef struct { int x, y, w, h, cx, cy; bool active; } Transfer;
+static Transfer upload, download;
 
 void gpu_init(void) {
     memset(vram, 0, sizeof vram);
@@ -495,8 +496,9 @@ static void start_transfer(bool to_vram) {
     int x = cmd[1] & 0x3FF, y = (cmd[1] >> 16) & 0x1FF;
     int w = ((cmd[2] & 0xFFFF) - 1) & 0x3FF, h = (((cmd[2] >> 16) & 0xFFFF) - 1) & 0x1FF;
     w += 1; h += 1;
-    if (to_vram) upload = (typeof(upload)){x, y, w, h, 0, 0, true};
-    else download = (typeof(download)){x, y, w, h, 0, 0, true};
+    Transfer t = {x, y, w, h, 0, 0, true};
+    if (to_vram) upload = t;
+    else download = t;
 }
 
 void gpu_vram_read(int x, int y, int w, int h, uint16_t *out) {

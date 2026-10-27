@@ -31,7 +31,12 @@ void gte_init(void) {
     }
 }
 
-static int clz32(uint32_t v) { return v ? __builtin_clz(v) : 32; }
+static int clz32(uint32_t v) {
+    int n = 0;
+    if (!v) return 32;
+    while (!(v & 0x80000000u)) { v <<= 1; n++; }
+    return n;
+}
 
 // ---------------------------------------------------------------- registers
 uint32_t gte_read_data(int r) {
@@ -251,7 +256,7 @@ static bool push_sxy(int64_t x, int64_t y) {
 static uint32_t gte_divide(void) {
     uint32_t sz3 = SZ[3];
     if (H < sz3 * 2) {
-        int z = __builtin_clz((uint32_t)sz3 | 1) - 16;
+        int z = clz32((uint32_t)sz3 | 1) - 16;
         uint32_t n = (uint32_t)H << z;
         uint32_t d = sz3 << z;
         uint32_t u = unr_table[(d - 0x7FC0) >> 7] + 0x101;

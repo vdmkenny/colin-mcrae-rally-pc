@@ -31,11 +31,17 @@ No game data is included or distributed: you build the port from your own disc i
 
 ## Building
 
-Requirements: CMake 3.20+, a C11 compiler (Clang or GCC), Python 3, SDL3, OpenGL 3.3.
+Requirements: CMake 3.20+, a C11 compiler, Python 3, SDL3 (3.2 or newer) and OpenGL 3.3.
+Developed on macOS with Clang; the code avoids compiler-specific extensions outside the
+optional debug trace, so GCC (Linux) and MSVC (Windows) builds are expected to work but
+have not been tested yet.
 
 ```bash
 brew install sdl3 cmake ninja      # macOS; use your package manager elsewhere
 ```
+
+If CMake does not find SDL3 (typically on Windows), set the `CMAKE_PREFIX_PATH`
+environment variable to the SDL3 install directory before running the build script.
 
 Then point the build script at your disc image (the `.cue` of the NTSC-U release with its
 `.bin` tracks):

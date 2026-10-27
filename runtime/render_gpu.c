@@ -291,11 +291,16 @@ void hw_set_draw_area(int x1, int y1, int x2, int y2) {
 // bilinear filtering is kept inside it so neighbouring textures on the page do not bleed in.
 // It covers the whole primitive, so the triangles of a quad filter alike along their diagonal.
 static uint32_t cur_uvlim;
+// The PlayStation samples the texel at each pixel's top-left corner. Where a flat (2D) primitive
+// maps its texture mirrored (u falling as x rises, as for flipped sprites), sampling inside the
+// pixel at high resolution lands one texel short and shows the neighbouring texel as a line along
+// the right or bottom edge; such primitives sample one texel step further on that axis.
+static float cur_uoff, cur_voff;
 
 static void push(GVtx *o, const HwVertex *v, const HwPrim *p, uint32_t pass) {
     o->x = v->x; o->y = v->y; o->w = v->w;
     o->r = v->r; o->g = v->g; o->b = v->b; o->a = 255;
-    o->u = v->u; o->v = v->v;
+    o->u = v->u + cur_uoff; o->v = v->v + cur_voff;
     o->tpage = (uint32_t)p->tex_x | ((uint32_t)p->tex_y << 16);
     o->clut = (uint32_t)p->clut_x | ((uint32_t)p->clut_y << 16);
     o->texwin = p->texwin;
@@ -497,8 +502,8 @@ static void resolve_frame(OpList *l) {
 // proportions instead of being stretched, each anchored to the left edge, centre or right edge
 // by which third of the screen it is in. A line of text is one element: consecutive 2D
 // primitives of similar height side by side on the same line move as a group. Sprites
-// placed in 3D (dust, smoke) keep their place and are narrowed. Decided after the vertex
-// resolution above.
+// placed in 3D (dust, smoke) keep their place and are narrowed; elements spanning the screen
+// (menu bars) stretch to the full width. Decided after the vertex resolution above.
 static void squeeze_ops(OpList *l, int i, int j, float anchor) {
     for (int t = i; t < j; t++)
         if (l->ops[t].type == OP_TRI)
@@ -544,7 +549,8 @@ static void widescreen_frame(OpList *l) {
             }
             float x1 = (float)ga->a[0], w = (float)(ga->a[2] - ga->a[0] + 1);
             float c = (gx1 + gx2) * 0.5f - x1;
-            squeeze_ops(l, gi, gj, c < w / 3 ? x1 : c > w * 2 / 3 ? x1 + w : x1 + w * 0.5f);
+            // elements spanning the screen (menu bars, backdrops) stretch to the full width
+            if (gx2 - gx1 < w * 0.9f) squeeze_ops(l, gi, gj, c < w / 3 ? x1 : c > w * 2 / 3 ? x1 + w : x1 + w * 0.5f);
             gi = -1;
         }
         if (is2d) {
@@ -669,19 +675,45 @@ static void compute_motion(void) {
 
 // Renders a recorded frame into `target`. With alpha < 1 vertices are moved back along the
 // motion field: alpha 0 is the previous frame's geometry, 1 the frame as recorded.
+// The span [lo, hi] of texture coordinates covers an aligned 16..256-texel tile (polygons
+// usually leave out its last texel).
+static bool whole_tile(float lo, float hi) {
+    for (int size = 16; size <= 256; size *= 2)
+        if (lo == floorf(lo) && (int)lo % size == 0 && hi - lo >= size - 2.5f && hi - lo <= size + 0.5f) return true;
+    return false;
+}
+
 static void set_uvlim(const OpList *l, int i) {
     float umin = 1e9f, umax = -1e9f, vmin = 1e9f, vmax = -1e9f;
+    const HwVertex *left = NULL, *right = NULL, *top = NULL, *bottom = NULL;
+    bool flat = true;
     for (int j = i; j < l->n && l->ops[j].type == OP_TRI && l->ops[j].p.id == l->ops[i].p.id; j++)
         for (int k = 0; k < 3; k++) {
             const HwVertex *v = &l->ops[j].v[k];
             umin = fminf(umin, v->u); umax = fmaxf(umax, v->u);
             vmin = fminf(vmin, v->v); vmax = fmaxf(vmax, v->v);
+            if (!left || v->x < left->x) left = v;
+            if (!right || v->x > right->x) right = v;
+            if (!top || v->y < top->y) top = v;
+            if (!bottom || v->y > bottom->y) bottom = v;
+            flat &= v->w == 1.0f;
         }
+    // mirrored axes of flat primitives: one texel step (at most a whole texel) further
+    cur_uoff = cur_voff = 0.0f;
+    if (flat && right->x > left->x && right->u < left->u)
+        cur_uoff = fminf((left->u - right->u) / (right->x - left->x), 1.0f);
+    if (flat && bottom->y > top->y && bottom->v < top->v)
+        cur_voff = fminf((top->v - bottom->v) / (bottom->y - top->y), 1.0f);
+    umin += cur_uoff; umax += cur_uoff;
+    vmin += cur_voff; vmax += cur_voff;
     // texel coordinates are floored, so the last texel of a span is max - 1 when max is fractional
     int u0 = (int)umin, v0 = (int)vmin, u1 = (int)(umax - 0.001f), v1 = (int)(vmax - 0.001f);
     if (u1 < u0) u1 = u0;
     if (v1 < v0) v1 = v0;
-
+    // Terrain and sky polygons each map a whole aligned tile whose texture continues on the
+    // neighbouring polygon: clamping there leaves a seam along every polygon edge, so they filter
+    // freely (one texel into the neighbouring tile at most). Atlases (the car) stay clamped.
+    if (!flat && whole_tile(umin, umax) && whole_tile(vmin, vmax)) { u0 = 0; v0 = 0; u1 = 255; v1 = 255; }
     cur_uvlim = (uint32_t)(u0 & 255) | ((uint32_t)(v0 & 255) << 8) | ((uint32_t)(u1 & 255) << 16) | ((uint32_t)(v1 & 255) << 24);
 }
 
@@ -710,8 +742,8 @@ static void render_ops(OpList *l, float alpha, SDL_GPUTexture **target) {
                         if (!motion[i * 3 + k].state) { v[k].x += sx / nm; v[k].y += sy / nm; }
             }
             pending.x1 = o->a[0]; pending.y1 = o->a[1]; pending.x2 = o->a[2]; pending.y2 = o->a[3];
-            if (o->p.textured && (i == 0 || l->ops[i - 1].type != OP_TRI || l->ops[i - 1].p.id != o->p.id))
-                set_uvlim(l, i);
+            if (!o->p.textured) cur_uoff = cur_voff = 0.0f;
+            else if (i == 0 || l->ops[i - 1].type != OP_TRI || l->ops[i - 1].p.id != o->p.id) set_uvlim(l, i);
             draw_tri(v, &o->p);
             break;
         }

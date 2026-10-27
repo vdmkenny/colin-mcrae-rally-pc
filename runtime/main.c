@@ -44,6 +44,7 @@ static struct {
     int scale;
     int exit_after;          // testing: quit after this many frames
     int shot_every;          // testing: save a screenshot every N frames
+    int shot_from;           // ... starting at this frame
     const char *shot_dir;
     const char *script;      // testing: scripted input "frame:buttons,..."
     const char *script2;     // testing: scripted input for a pad on port 2
@@ -459,7 +460,7 @@ void host_frame(void) {
     if (!fast() || (frame_count % 8) == 0) present_vblank();
     else render_vblank();
     push_audio();
-    if (opts.shot_every && frame_count % opts.shot_every == 0) save_screenshot();
+    if (opts.shot_every && frame_count >= opts.shot_from && frame_count % opts.shot_every == 0) save_screenshot();
     {
         // testing: CMR_ANALOG_AT=<frame> presses the DualShock ANALOG button on port 1
         static long at = -2;
@@ -738,6 +739,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--log") && i + 1 < argc) log_level = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--exit-after") && i + 1 < argc) opts.exit_after = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--shot-every") && i + 1 < argc) opts.shot_every = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--shot-from") && i + 1 < argc) opts.shot_from = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--shot-dir") && i + 1 < argc) opts.shot_dir = argv[++i];
         else if (!strcmp(argv[i], "--script") && i + 1 < argc) opts.script = argv[++i];
         else if (!strcmp(argv[i], "--script2") && i + 1 < argc) opts.script2 = argv[++i];

@@ -1,5 +1,7 @@
 // SDL3 host: window, presentation, audio, input and frame pacing.
 #include "psx.h"
+#include "pgxp.h"
+#include "render.h"
 #include <SDL3/SDL.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -13,15 +15,15 @@ int spu_take(int16_t *dst, int frames);
 void trace_dump(void);
 
 static SDL_Window *window;
-static SDL_Renderer *renderer;
-static SDL_Texture *texture;
 static SDL_AudioStream *audio;
 static SDL_Gamepad *gamepad;
 static uint32_t frame_rgba[640 * 512];
+
 static uint64_t next_vblank;
 static uint64_t pace_ns;
 static bool fast_forward;
-static bool linear_filter = false;
+static bool vsync = true;
+static bool vsync_paces;     // the display runs at ~60 Hz, so buffer swaps pace emulation
 
 static struct {
     const char *cue;
@@ -53,9 +55,21 @@ static uint16_t script_buttons(int frame) {
 }
 
 static void save_screenshot(void) {
+    DisplayInfo d;
+    gpu_display_info(&d);
+    uint32_t *hi = NULL;
     int w, h, stride;
-    gpu_display(frame_rgba, &w, &h, &stride);
-    SDL_Surface *s = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_ABGR8888, frame_rgba, stride * 4);
+    SDL_Surface *s;
+    if (render_read_display(&d, &hi, &w, &h)) {
+        s = SDL_CreateSurface(w, h, SDL_PIXELFORMAT_ABGR8888);
+        for (int y = 0; y < h; y++)
+            memcpy((uint8_t *)s->pixels + (size_t)y * s->pitch, hi + (size_t)y * w, (size_t)w * 4);
+        free(hi);
+    } else {
+        gpu_display(frame_rgba, &w, &h, &stride);
+        s = SDL_CreateSurface(w, h, SDL_PIXELFORMAT_ABGR8888);
+        for (int y = 0; y < h; y++) memcpy((uint8_t *)s->pixels + (size_t)y * s->pitch, frame_rgba + y * stride, (size_t)w * 4);
+    }
     char path[1200];
     snprintf(path, sizeof path, "%s/frame%05d.bmp", opts.shot_dir, frame_count);
     SDL_SaveBMP(s, path);
@@ -151,10 +165,15 @@ static void handle_events(void) {
             } else if (e.key.scancode == SDL_SCANCODE_TAB) {
                 fast_forward = true;
             } else if (e.key.scancode == SDL_SCANCODE_F2) {
-                linear_filter = !linear_filter;
-                SDL_SetTextureScaleMode(texture, linear_filter ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+                render_cfg.filter = !render_cfg.filter;
             } else if (e.key.scancode == SDL_SCANCODE_F3) {
                 gpu_dither_enabled = !gpu_dither_enabled;
+            } else if (e.key.scancode == SDL_SCANCODE_F4) {
+                render_cfg.hw = !render_cfg.hw;
+                LOG("[render] %s renderer\n", render_cfg.hw ? "high-resolution" : "original 1x");
+            } else if (e.key.scancode == SDL_SCANCODE_F5) {
+                pgxp_enabled = !pgxp_enabled;
+                LOG("[render] precise vertices %s\n", pgxp_enabled ? "on" : "off");
             } else if (e.key.scancode == SDL_SCANCODE_ESCAPE && (e.key.mod & SDL_KMOD_SHIFT)) {
                 exit(0);
             }
@@ -177,24 +196,30 @@ void sio_set_analog(bool on);
 
 // ----------------------------------------------------------------- frames
 static void present(void) {
-    int w, h, stride;
-    gpu_display(frame_rgba, &w, &h, &stride);
-    SDL_Rect r = {0, 0, w, h};
-    SDL_UpdateTexture(texture, &r, frame_rgba, stride * 4);
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-    SDL_RenderClear(renderer);
-    SDL_FRect src = {0, 0, (float)w, (float)h};
-    SDL_RenderTexture(renderer, texture, &src, NULL);
-    SDL_RenderPresent(renderer);
+    DisplayInfo d;
+    gpu_display_info(&d);
+    if (!render_cfg.hw || d.rgb24) {
+        int w, h, stride;
+        gpu_display(frame_rgba, &w, &h, &stride);
+        render_present(&d, frame_rgba);
+    } else {
+        render_present(&d, NULL);
+    }
 }
 
 static void push_audio(void) {
     int16_t buf[8192 * 2];
     int n = spu_take(buf, 8192);
-    if (!audio || !n) return;
-    // Keep latency bounded: drop audio when the device falls far behind.
-    if (SDL_GetAudioStreamQueued(audio) > 44100 * 4 / 5) return;
-    if (fast_forward) return;
+    if (!audio || !n || fast_forward) return;
+    // Dynamic rate control: nudge the playback rate so the queue hovers around ~50 ms,
+    // which absorbs the 60 vs 59.94 Hz difference when the display paces emulation.
+    const int target = 44100 * 4 / 20;
+    int queued = SDL_GetAudioStreamQueued(audio);
+    if (queued > target * 8) { SDL_ClearAudioStream(audio); queued = 0; }
+    float ratio = 1.0f + (float)(queued - target) / (float)target * 0.005f;
+    if (ratio < 0.995f) ratio = 0.995f;
+    if (ratio > 1.005f) ratio = 1.005f;
+    SDL_SetAudioStreamFrequencyRatio(audio, ratio);
     SDL_PutAudioStreamData(audio, buf, n * 4);
 }
 
@@ -204,6 +229,7 @@ static void pace(void) {
     if (!pace_ns || now > pace_ns + frame_ns * 4) pace_ns = now;
     pace_ns += frame_ns;
     if (fast_forward) { pace_ns = now; return; }
+    if (vsync_paces) return;   // SDL_GL_SwapWindow already waited for the display
     if (pace_ns > now) SDL_DelayPrecise(pace_ns - now);
 }
 
@@ -250,19 +276,31 @@ static void usage(void) {
     fprintf(stderr,
             "usage: cmrally [options] [game.cue]\n"
             "  --fullscreen        start fullscreen (toggle with F11 / Alt+Enter)\n"
-            "  --scale N           window scale (default 3)\n"
+            "  --window N          window size as a multiple of 320x240 (default 3)\n"
             "  --analog            present a DualShock in analog mode\n"
             "  --cpu N             CPU cycles per instruction (default 2; 1 = faster CPU)\n"
             "  --no-dither         disable PlayStation dithering (toggle with F3)\n"
+            "  --software          show the original 1x software renderer (toggle with F4)\n"
+            "  --scale N           internal resolution multiplier (default: match the window)\n"
+            "  --filter            bilinear texture filtering (toggle with F2)\n"
+            "  --widescreen        16:9 with a widened 3D projection\n"
+            "  --no-pgxp           disable sub-pixel vertex precision (toggle with F5)\n"
+            "  --no-vsync          do not sync presentation to the display\n"
             "  --log N             debug log level\n"
             "keys: arrows=d-pad X=cross C=circle Z=square S=triangle Q/W=L1/R1 A/D=L2/R2\n"
-            "      Enter=start RShift=select Tab=fast-forward F2=filtering Shift+Esc=quit\n");
+            "      Enter=start RShift=select Tab=fast-forward F11=fullscreen Shift+Esc=quit\n");
 }
 
 int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--fullscreen")) opts.fullscreen = true;
-        else if (!strcmp(argv[i], "--scale") && i + 1 < argc) opts.scale = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--window") && i + 1 < argc) opts.scale = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--scale") && i + 1 < argc) render_cfg.scale = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--software")) render_cfg.hw = false;
+        else if (!strcmp(argv[i], "--filter")) render_cfg.filter = true;
+        else if (!strcmp(argv[i], "--widescreen")) render_cfg.widescreen = true;
+        else if (!strcmp(argv[i], "--no-pgxp")) pgxp_enabled = false;
+        else if (!strcmp(argv[i], "--no-vsync")) vsync = false;
         else if (!strcmp(argv[i], "--analog")) pad_analog_mode = true;
         else if (!strcmp(argv[i], "--cpu") && i + 1 < argc) cycles_per_insn = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-dither")) gpu_dither_enabled = false;
@@ -289,13 +327,25 @@ int main(int argc, char **argv) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
-    window = SDL_CreateWindow("Colin McRae Rally", 320 * opts.scale, 240 * opts.scale,
-                              SDL_WINDOW_RESIZABLE | (opts.fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
-    renderer = SDL_CreateRenderer(window, NULL);
-    SDL_SetRenderVSync(renderer, 0);
-    SDL_SetRenderLogicalPresentation(renderer, 640, 480, SDL_LOGICAL_PRESENTATION_LETTERBOX);
-    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 640, 512);
-    SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    int win_w = (render_cfg.widescreen ? 427 : 320) * opts.scale;
+    window = SDL_CreateWindow("Colin McRae Rally", win_w, 240 * opts.scale,
+                              SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+                                  (opts.fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+    if (!window || !render_init(window)) {
+        fprintf(stderr, "Cannot create an OpenGL 3.3 window: %s\n", SDL_GetError());
+        return 1;
+    }
+    if (opts.turbo) vsync = false;
+    SDL_GL_SetSwapInterval(vsync ? 1 : 0);
+    const SDL_DisplayMode *dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
+    vsync_paces = vsync && dm && dm->refresh_rate > 58.5f && dm->refresh_rate < 61.5f;
+    LOG("[host] display %.2f Hz, %s\n", dm ? dm->refresh_rate : 0.0f,
+        vsync_paces ? "vsync paces emulation" : "timer paces emulation");
     SDL_AudioSpec spec = {SDL_AUDIO_S16, 2, 44100};
     audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
     if (audio) SDL_ResumeAudioStreamDevice(audio);

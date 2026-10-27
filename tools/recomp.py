@@ -38,6 +38,7 @@ class Module:
         self.extra = extra_entries
         self.cache = {}
         self.warnings = []
+        self.pgxp_regs = set()
 
     def insn(self, a):
         i = self.cache.get(a)
@@ -341,7 +342,10 @@ def emit_insn(m, i, out):
     elif o == "sh":
         out.append(f"WR16({addr}, {rt});")
     elif o == "sw":
-        out.append(f"WR32({addr}, {rt});")
+        if i.rt in m.pgxp_regs:
+            out.append(f"pgxp_sw({addr}, {i.rt}, {rt});")
+        else:
+            out.append(f"WR32({addr}, {rt});")
     elif o == "swl":
         out.append(f"op_swl({addr}, {rt});")
     elif o == "swr":
@@ -354,6 +358,8 @@ def emit_insn(m, i, out):
         out.append("cop0_rfe(c);")
     elif o == "mfc2":
         setr(i.rt, f"gte_read_data({i.rd})")
+        if 12 <= i.rd <= 15 and i.rt:
+            out.append(f"pgxp_mfc2({i.rt}, {i.rd}, R({i.rt}));")
     elif o == "cfc2":
         setr(i.rt, f"gte_read_ctrl({i.rd})")
     elif o == "mtc2":
@@ -363,7 +369,10 @@ def emit_insn(m, i, out):
     elif o == "lwc2":
         out.append(f"gte_write_data({i.rt}, RD32({addr}));")
     elif o == "swc2":
-        out.append(f"WR32({addr}, gte_read_data({i.rt}));")
+        if 12 <= i.rt <= 15:
+            out.append(f"pgxp_swc2({addr}, {i.rt});")
+        else:
+            out.append(f"WR32({addr}, gte_read_data({i.rt}));")
     elif o == "cop2":
         out.append(f"gte_command(0x{i.word & 0x1FFFFFF:x}u);")
     elif o == "syscall":
@@ -405,6 +414,8 @@ def gen_function(m, entry, protos):
         return [f"void {m.fname(entry)}(CPU *c) {{ R(9) = 0x{stub[1]:x}; bios_call(c, 0x{stub[0]:x}, 0x{stub[1]:x}); }}"]
     body, tables = m.walk(entry)
     addrs = sorted(body)
+    # registers that may carry precise screen coordinates (mfc2 from SXY0-2/SXYP)
+    m.pgxp_regs = {m.insn(a).rt for a in addrs if m.insn(a).op == "mfc2" and 12 <= m.insn(a).rd <= 15}
 
     # A delay slot is "owned" by the branch before it and emitted together with it.
     slots = set()

@@ -1,5 +1,7 @@
 // Geometry Transformation Engine (COP2), bit-accurate to the hardware.
 #include "psx.h"
+#include "pgxp.h"
+#include "render.h"
 
 static int16_t V[3][3];          // vectors 0-2 (x,y,z)
 static uint8_t RGBC[4];
@@ -74,11 +76,19 @@ void gte_write_data(int r, uint32_t v) {
     case 6: RGBC[0] = v; RGBC[1] = v >> 8; RGBC[2] = v >> 16; RGBC[3] = v >> 24; break;
     case 7: OTZ = (uint16_t)v; break;
     case 8: case 9: case 10: case 11: IR[r - 8] = (int16_t)v; break;
-    case 12: case 13: case 14: SXY[r - 12][0] = (int16_t)v; SXY[r - 12][1] = (int16_t)(v >> 16); break;
+    case 12: case 13: case 14:
+        SXY[r - 12][0] = (int16_t)v; SXY[r - 12][1] = (int16_t)(v >> 16);
+        pgxp_sxy_valid[r - 12] = false;
+        break;
     case 15:
         SXY[0][0] = SXY[1][0]; SXY[0][1] = SXY[1][1];
         SXY[1][0] = SXY[2][0]; SXY[1][1] = SXY[2][1];
         SXY[2][0] = (int16_t)v; SXY[2][1] = (int16_t)(v >> 16);
+        memcpy(pgxp_sxy[0], pgxp_sxy[1], sizeof pgxp_sxy[0]);
+        memcpy(pgxp_sxy[1], pgxp_sxy[2], sizeof pgxp_sxy[0]);
+        pgxp_sxy_valid[0] = pgxp_sxy_valid[1];
+        pgxp_sxy_valid[1] = false;
+        pgxp_sxy_valid[2] = false;
         break;
     case 16: case 17: case 18: case 19: SZ[r - 16] = (uint16_t)v; break;
     case 20: case 21: case 22:
@@ -219,12 +229,19 @@ static void push_sz(int64_t v) {
     SZ[3] = (uint16_t)v;
 }
 
-static void push_sxy(int64_t x, int64_t y) {
-    if (x < -0x400) { FLAG |= 1u << 14; x = -0x400; } else if (x > 0x3FF) { FLAG |= 1u << 14; x = 0x3FF; }
-    if (y < -0x400) { FLAG |= 1u << 13; y = -0x400; } else if (y > 0x3FF) { FLAG |= 1u << 13; y = 0x3FF; }
+static bool push_sxy(int64_t x, int64_t y) {
+    bool clamped = false;
+    if (x < -0x400) { FLAG |= 1u << 14; x = -0x400; clamped = true; } else if (x > 0x3FF) { FLAG |= 1u << 14; x = 0x3FF; clamped = true; }
+    if (y < -0x400) { FLAG |= 1u << 13; y = -0x400; clamped = true; } else if (y > 0x3FF) { FLAG |= 1u << 13; y = 0x3FF; clamped = true; }
     SXY[0][0] = SXY[1][0]; SXY[0][1] = SXY[1][1];
     SXY[1][0] = SXY[2][0]; SXY[1][1] = SXY[2][1];
     SXY[2][0] = (int16_t)x; SXY[2][1] = (int16_t)y;
+    memcpy(pgxp_sxy[0], pgxp_sxy[1], sizeof pgxp_sxy[0]);
+    memcpy(pgxp_sxy[1], pgxp_sxy[2], sizeof pgxp_sxy[0]);
+    pgxp_sxy_valid[0] = pgxp_sxy_valid[1];
+    pgxp_sxy_valid[1] = pgxp_sxy_valid[2];
+    pgxp_sxy_valid[2] = false;
+    return !clamped;
 }
 
 static uint32_t gte_divide(void) {
@@ -259,11 +276,25 @@ static void rtp(int v, bool last) {
         IR[3] = (int16_t)(m3 < lo ? lo : (m3 > 0x7FFF ? 0x7FFF : m3));
     }
     push_sz(z >> 12);
+    bool div_ok = H < (uint32_t)SZ[3] * 2;
     uint32_t div = gte_divide();
     int64_t sx = (int64_t)div * IR[1] + OFX;
     int64_t sy = (int64_t)div * IR[2] + OFY;
+    if (render_cfg.widescreen) sx = OFX + (sx - OFX) * 3 / 4;
     set_mac0(sx); set_mac0(sy);
-    push_sxy(sx >> 16, sy >> 16);
+    bool ok = push_sxy(sx >> 16, sy >> 16);
+    // Precise projection for the high-resolution renderer, when the hardware result was
+    // not saturated anywhere along the way.
+    int64_t m1 = x >> 12, m2 = y >> 12;
+    if (ok && div_ok && sf_shift == 12 && m1 >= -0x8000 && m1 <= 0x7FFF && m2 >= -0x8000 && m2 <= 0x7FFF && z > 0) {
+        double zf = (double)z / 4096.0;
+        double px = (double)x / 4096.0 * H / zf, py = (double)y / 4096.0 * H / zf;
+        if (render_cfg.widescreen) px *= 0.75;
+        pgxp_sxy[2][0] = (float)(OFX / 65536.0 + px);
+        pgxp_sxy[2][1] = (float)(OFY / 65536.0 + py);
+        pgxp_sxy[2][2] = (float)zf;
+        pgxp_sxy_valid[2] = true;
+    }
     if (last) {
         int64_t d = (int64_t)div * DQA + DQB;
         set_mac0(d);

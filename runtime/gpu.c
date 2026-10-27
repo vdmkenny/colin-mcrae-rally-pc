@@ -1,5 +1,7 @@
 // PlayStation GPU: command processing and a software rasterizer on 1024x512 VRAM.
 #include "psx.h"
+#include "pgxp.h"
+#include "render.h"
 
 uint16_t vram[1024 * 512];
 
@@ -22,8 +24,12 @@ static bool field_odd;
 
 bool gpu_dither_enabled = true;
 
-// command fifo
+uint32_t gpu_stat_precise, gpu_stat_imprecise;
+
+// command fifo; cmd_addr holds the RAM address each word came from (DMA) for PGXP lookups
 static uint32_t cmd[16];
+static uint32_t cmd_addr[16];
+static uint32_t word_addr = PGXP_NO_ADDR;
 static int cmd_len, cmd_need;
 static bool polyline;
 
@@ -125,7 +131,7 @@ static inline uint16_t modulate(uint16_t texel, int r, int g, int b, int x, int 
 }
 
 // ------------------------------------------------------------- triangles
-typedef struct { int x, y, r, g, b, u, v; } Vtx;
+typedef struct { int x, y, r, g, b, u, v; float fx, fy, fw; bool precise; } Vtx;
 
 enum { F_SHADED = 1, F_TEXTURED = 2, F_SEMI = 4, F_RAW = 8 };
 
@@ -227,6 +233,42 @@ static TexInfo make_tex(uint32_t clut_word, uint32_t page_word) {
     return t;
 }
 
+static uint32_t texwin_bits(void) {
+    return tw_mask_x | (tw_mask_y << 5) | (tw_off_x << 10) | (tw_off_y << 15);
+}
+
+static HwVertex hw_vtx(const Vtx *v, bool perspective) {
+    HwVertex h;
+    h.x = v->precise ? v->fx : (float)v->x;
+    h.y = v->precise ? v->fy : (float)v->y;
+    h.w = perspective ? v->fw : 1.0f;
+    h.r = (uint8_t)v->r; h.g = (uint8_t)v->g; h.b = (uint8_t)v->b;
+    h.u = (float)v->u; h.v = (float)v->v;
+    return h;
+}
+
+static void hw_tri(const Vtx *a, const Vtx *b, const Vtx *c, const HwPrim *p) {
+    bool persp = a->precise && b->precise && c->precise && p->textured;
+    HwVertex v[3] = {hw_vtx(a, persp), hw_vtx(b, persp), hw_vtx(c, persp)};
+    // Same size limit as the hardware: oversized polygons are not drawn at all.
+    int minx = a->x < b->x ? a->x : b->x, maxx = a->x > b->x ? a->x : b->x;
+    int miny = a->y < b->y ? a->y : b->y, maxy = a->y > b->y ? a->y : b->y;
+    if (c->x < minx) minx = c->x; if (c->x > maxx) maxx = c->x;
+    if (c->y < miny) miny = c->y; if (c->y > maxy) maxy = c->y;
+    if (maxx - minx >= 1024 || maxy - miny >= 512) return;
+    hw_triangle(v, p);
+}
+
+static HwPrim hw_prim(const TexInfo *t, bool textured, bool raw, bool semi, bool filterable) {
+    HwPrim p;
+    p.textured = textured; p.raw = raw; p.semi = semi; p.filterable = filterable;
+    p.semi_mode = textured ? t->semi_mode : (int)((texpage >> 5) & 3);
+    p.depth = t->tex_depth;
+    p.tex_x = t->tx; p.tex_y = t->ty; p.clut_x = t->clut_x; p.clut_y = t->clut_y;
+    p.texwin = texwin_bits();
+    return p;
+}
+
 static void cmd_polygon(void) {
     uint32_t op = cmd[0] >> 24;
     bool quad = op & 8, shaded = op & 0x10, textured = op & 4, semi = op & 2, raw = op & 1;
@@ -237,10 +279,14 @@ static void cmd_polygon(void) {
     int k = 1;
     for (int i = 0; i < n; i++) {
         uint32_t col = (i > 0 && shaded) ? cmd[k++] : cmd[0];
+        uint32_t xy_addr = cmd_addr[k];
         uint32_t xy = cmd[k++];
         v[i].r = col & 0xFF; v[i].g = (col >> 8) & 0xFF; v[i].b = (col >> 16) & 0xFF;
         v[i].x = sext11(sext11(xy & 0x7FF) + off_x);
         v[i].y = sext11(sext11((xy >> 16) & 0x7FF) + off_y);
+        v[i].precise = pgxp_lookup(xy_addr, xy, &v[i].fx, &v[i].fy, &v[i].fw);
+        if (v[i].precise) { v[i].fx += off_x; v[i].fy += off_y; gpu_stat_precise++; }
+        else gpu_stat_imprecise++;
         v[i].u = v[i].v = 0;
         if (textured) {
             uint32_t uv = cmd[k++];
@@ -258,10 +304,37 @@ static void cmd_polygon(void) {
     if (textured && (texpage & 0x800)) flags &= ~F_TEXTURED;   // texture disable
     draw_triangle(v[0], v[1], v[2], flags, &t);
     if (quad) draw_triangle(v[1], v[2], v[3], flags, &t);
+    HwPrim hp = hw_prim(&t, flags & F_TEXTURED, raw, semi, true);
+    if (!shaded) for (int i = 1; i < n; i++) { v[i].r = v[0].r; v[i].g = v[0].g; v[i].b = v[0].b; }
+    hw_tri(&v[0], &v[1], &v[2], &hp);
+    if (quad) hw_tri(&v[1], &v[2], &v[3], &hp);
 }
 
 // -------------------------------------------------------------------- lines
+static void hw_line(Vtx a, Vtx b, bool shaded, bool semi) {
+    // a one-pixel-wide quad covering the line, endpoints included
+    if (!shaded) { b.r = a.r; b.g = a.g; b.b = a.b; }
+    int dx = b.x - a.x, dy = b.y - a.y;
+    float ax = (float)a.x, ay = (float)a.y, bx = (float)b.x, by = (float)b.y;
+    Vtx q[4] = {a, b, a, b};
+    if ((dx < 0 ? -dx : dx) >= (dy < 0 ? -dy : dy)) {
+        if (bx >= ax) bx += 1; else ax += 1;
+        q[0].fx = ax; q[0].fy = ay; q[1].fx = bx; q[1].fy = by;
+        q[2].fx = ax; q[2].fy = ay + 1; q[3].fx = bx; q[3].fy = by + 1;
+    } else {
+        if (by >= ay) by += 1; else ay += 1;
+        q[0].fx = ax; q[0].fy = ay; q[1].fx = bx; q[1].fy = by;
+        q[2].fx = ax + 1; q[2].fy = ay; q[3].fx = bx + 1; q[3].fy = by;
+    }
+    for (int i = 0; i < 4; i++) q[i].precise = true;
+    TexInfo t = {0};
+    HwPrim p = hw_prim(&t, false, false, semi, false);
+    hw_tri(&q[0], &q[1], &q[2], &p);
+    hw_tri(&q[1], &q[2], &q[3], &p);
+}
+
 static void draw_line(Vtx a, Vtx b, bool shaded, bool semi) {
+    hw_line(a, b, shaded, semi);
     int dx = b.x - a.x, dy = b.y - a.y;
     int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
     if (adx >= 1024 || ady >= 512) return;
@@ -302,6 +375,27 @@ static void draw_rect(int x0, int y0, int w, int h, uint32_t col, int u0, int v0
     uint16_t flat = pack_rgb(r, g, b, 0, 0, false);
     int semi_mode = (texpage >> 5) & 3;
     if (texpage & 0x800) textured = false;
+    {
+        // UVs at the corners such that each pixel centre samples the same texel as hardware
+        float ua = rect_flip_x ? u0 + 1.0f : (float)u0, ub = rect_flip_x ? u0 + 1.0f - w : (float)(u0 + w);
+        float va = rect_flip_y ? v0 + 1.0f : (float)v0, vb = rect_flip_y ? v0 + 1.0f - h : (float)(v0 + h);
+        Vtx q[4];
+        float xs[4] = {(float)x0, (float)(x0 + w), (float)x0, (float)(x0 + w)};
+        float ys[4] = {(float)y0, (float)y0, (float)(y0 + h), (float)(y0 + h)};
+        float us[4] = {ua, ub, ua, ub}, vs[4] = {va, va, vb, vb};
+        for (int i = 0; i < 4; i++) {
+            q[i] = (Vtx){x0, y0, r, g, b, 0, 0, xs[i], ys[i], 1.0f, true};
+        }
+        HwPrim p = hw_prim(&t, textured, raw, semi, false);
+        p.semi_mode = semi_mode;
+        HwVertex hv[4];
+        for (int i = 0; i < 4; i++) { hv[i] = hw_vtx(&q[i], false); hv[i].u = us[i]; hv[i].v = vs[i]; }
+        if (w > 0 && h > 0) {
+            HwVertex t1[3] = {hv[0], hv[1], hv[2]}, t2[3] = {hv[1], hv[2], hv[3]};
+            hw_triangle(t1, &p);
+            hw_triangle(t2, &p);
+        }
+    }
     for (int yy = 0; yy < h; yy++) {
         int y = y0 + yy;
         if (y < da_y1 || y > da_y2) continue;
@@ -354,7 +448,10 @@ static void vram_put(uint16_t pix) {
     if (!(mask_check && (*d & 0x8000))) *d = pix | (mask_set ? 0x8000 : 0);
     if (++upload.cx >= upload.w) {
         upload.cx = 0;
-        if (++upload.cy >= upload.h) upload.active = false;
+        if (++upload.cy >= upload.h) {
+            upload.active = false;
+            hw_upload(upload.x, upload.y, upload.w, upload.h);
+        }
     }
 }
 
@@ -402,7 +499,7 @@ static int cmd_size(uint32_t op) {
     return 1;
 }
 
-uint32_t gpu_stat_prims, gpu_stat_uploads, gpu_stat_fills;
+uint32_t gpu_stat_prims, gpu_stat_uploads, gpu_stat_fills, gpu_stat_flips;
 
 static void exec_cmd(void) {
     uint32_t op = cmd[0] >> 24;
@@ -425,6 +522,8 @@ static void exec_cmd(void) {
         uint16_t c = pack_rgb(cmd[0] & 0xFF, (cmd[0] >> 8) & 0xFF, (cmd[0] >> 16) & 0xFF, 0, 0, false);
         for (int j = 0; j < h; j++)
             for (int i = 0; i < w; i++) vram[((y + j) & 511) * 1024 + ((x + i) & 1023)] = c;
+        hw_fill(x, y, x + w > 1024 ? 1024 - x : w, y + h > 512 ? 512 - y : h, cmd[0] & 0xFF, (cmd[0] >> 8) & 0xFF,
+                (cmd[0] >> 16) & 0xFF);
         break;
     }
     case 0x1F: gpu_irq = true; irq_raise(IRQ_GPU); break;
@@ -437,8 +536,8 @@ static void exec_cmd(void) {
         tw_mask_x = cmd[0] & 31; tw_mask_y = (cmd[0] >> 5) & 31;
         tw_off_x = (cmd[0] >> 10) & 31; tw_off_y = (cmd[0] >> 15) & 31;
         break;
-    case 0xE3: da_x1 = cmd[0] & 0x3FF; da_y1 = (cmd[0] >> 10) & 0x1FF; break;
-    case 0xE4: da_x2 = cmd[0] & 0x3FF; da_y2 = (cmd[0] >> 10) & 0x1FF; break;
+    case 0xE3: da_x1 = cmd[0] & 0x3FF; da_y1 = (cmd[0] >> 10) & 0x1FF; hw_set_draw_area(da_x1, da_y1, da_x2, da_y2); break;
+    case 0xE4: da_x2 = cmd[0] & 0x3FF; da_y2 = (cmd[0] >> 10) & 0x1FF; hw_set_draw_area(da_x1, da_y1, da_x2, da_y2); break;
     case 0xE5: off_x = sext11(cmd[0] & 0x7FF); off_y = sext11((cmd[0] >> 11) & 0x7FF); break;
     case 0xE6: mask_set = cmd[0] & 1; mask_check = cmd[0] & 2; break;
     default:
@@ -452,6 +551,7 @@ static void exec_cmd(void) {
                     uint16_t *d = &vram[((dy + j) & 511) * 1024 + ((dx + i) & 1023)];
                     if (!(mask_check && (*d & 0x8000))) *d = v | (mask_set ? 0x8000 : 0);
                 }
+            hw_copy(sx, sy, dx, dy, w, h);
         } else if (op >= 0xA0 && op < 0xC0) {
             start_transfer(true);
         } else if (op >= 0xC0 && op < 0xE0) {
@@ -509,6 +609,7 @@ void gpu_gp0(uint32_t v) {
         }
         cmd_need = n;
     }
+    cmd_addr[cmd_len] = word_addr;
     cmd[cmd_len++] = v;
     if (cmd_len >= cmd_need) {
         cmd_len = 0;
@@ -531,7 +632,10 @@ void gpu_gp1(uint32_t v) {
     case 0x02: gpu_irq = false; break;
     case 0x03: disp_enabled = !(v & 1); break;
     case 0x04: dma_dir = v & 3; break;
-    case 0x05: disp_x = v & 0x3FE; disp_y = (v >> 10) & 0x1FF; break;
+    case 0x05:
+        if ((v & 0x3FE) != disp_x || ((v >> 10) & 0x1FF) != disp_y) gpu_stat_flips++;
+        disp_x = v & 0x3FE; disp_y = (v >> 10) & 0x1FF;
+        break;
     case 0x06: disp_h1 = v & 0xFFF; disp_h2 = (v >> 12) & 0xFFF; break;
     case 0x07: disp_v1 = v & 0x3FF; disp_v2 = (v >> 10) & 0x3FF; break;
     case 0x08: disp_mode = v & 0xFF; break;
@@ -587,18 +691,20 @@ uint32_t gpu_status(void) {
 
 void gpu_vblank(void) {
     field_odd = !field_odd;
+    hw_vram_changed();
     static int n;
     if (log_level >= 1 && ++n % 60 == 0) {
-        LOG("[gpu] prims=%u uploads=%u fills=%u disp=%s mode=%02x at %u,%u range v%u-%u\n", gpu_stat_prims,
+        LOG("[gpu] precise=%u/%u flips=%u prims=%u uploads=%u fills=%u disp=%s mode=%02x at %u,%u range v%u-%u\n", gpu_stat_precise, gpu_stat_precise + gpu_stat_imprecise, gpu_stat_flips, gpu_stat_prims,
             gpu_stat_uploads, gpu_stat_fills, disp_enabled ? "on" : "off", disp_mode, disp_x, disp_y, disp_v1, disp_v2);
-        gpu_stat_prims = gpu_stat_uploads = gpu_stat_fills = 0;
+        gpu_stat_prims = gpu_stat_uploads = gpu_stat_fills = gpu_stat_flips = 0;
+        gpu_stat_precise = gpu_stat_imprecise = 0;
     }
 }
 
 void gpu_dma_block(uint32_t addr, uint32_t words, bool to_gpu) {
     for (uint32_t i = 0; i < words; i++) {
         uint32_t a = (addr + i * 4) & 0x1FFFFC;
-        if (to_gpu) { uint32_t w; memcpy(&w, psx_ram + a, 4); gpu_gp0(w); }
+        if (to_gpu) { uint32_t w; memcpy(&w, psx_ram + a, 4); word_addr = a; gpu_gp0(w); word_addr = PGXP_NO_ADDR; }
         else { uint32_t w = gpu_read(); memcpy(psx_ram + a, &w, 4); }
     }
 }
@@ -612,9 +718,11 @@ void gpu_dma_list(uint32_t addr) {
         uint32_t n = hdr >> 24;
         for (uint32_t i = 0; i < n; i++) {
             uint32_t w;
-            memcpy(&w, psx_ram + ((addr + 4 + i * 4) & 0x1FFFFC), 4);
+            word_addr = (addr + 4 + i * 4) & 0x1FFFFC;
+            memcpy(&w, psx_ram + word_addr, 4);
             gpu_gp0(w);
         }
+        word_addr = PGXP_NO_ADDR;
         if ((hdr & 0x800000) || --guard == 0) break;
         addr = hdr & 0x1FFFFC;
     }
@@ -655,4 +763,17 @@ bool gpu_display(uint32_t *rgba, int *w, int *h, int *stride) {
         }
     }
     return true;
+}
+
+void gpu_display_info(DisplayInfo *d) {
+    static const int widths[8] = {256, 320, 512, 640, 368, 368, 368, 368};
+    d->w = (disp_mode & 0x40) ? 368 : widths[disp_mode & 3];
+    bool interlaced = (disp_mode & 0x24) == 0x24;
+    int lines = (int)disp_v2 - (int)disp_v1;
+    if (lines <= 0 || lines > 256) lines = 240;
+    d->h = interlaced ? lines * 2 : lines;
+    if (d->h > 512) d->h = 512;
+    d->x = disp_x; d->y = disp_y;
+    d->enabled = disp_enabled;
+    d->rgb24 = disp_mode & 0x10;
 }

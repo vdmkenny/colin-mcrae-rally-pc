@@ -27,16 +27,24 @@ typedef struct {
 static SDL_Window *win;
 static SDL_GPUDevice *dev;
 static bool ready;
+static SDL_GPUShader *draw_vs, *draw_fs, *blit_vs, *blit_fs, *present_vs, *present_fs;
 static SDL_GPUGraphicsPipeline *pipe_draw[5];   // opaque, then semi-transparency modes 0-3
-static SDL_GPUGraphicsPipeline *pipe_blit, *pipe_present;
-static SDL_GPUSampler *smp_linear;
+static SDL_GPUGraphicsPipeline *pipe_blit, *pipe_seed, *pipe_present;
+static SDL_GPUSampler *smp_linear, *smp_nearest;
 // 1x VRAM and CPU transfers (as they were at transfer time) are read by the shaders from
 // storage buffers, two 16-bit pixels per word: SDL_GPU cannot sample integer textures.
 static SDL_GPUBuffer *buf_vram;
 static SDL_GPUBuffer *buf_upload;
 static uint32_t buf_upload_size;
 static SDL_GPUTexture *tex_hi;                    // high-resolution VRAM
-static SDL_GPUTexture *tex_tmp;                   // scratch for VRAM-to-VRAM copies
+static SDL_GPUTexture *tex_tmp;                   // scratch for VRAM-to-VRAM copies; MSAA resolve target
+// Anti-aliasing: drawing goes to a multisampled texture that only lives for one render pass. It
+// is seeded with the current image, drawn to, and resolved into tex_tmp, which then takes the
+// place of the target (tile-based GPUs keep the samples on chip, so this costs about what loading
+// and storing the target does).
+static SDL_GPUTexture *tex_msaa;
+static SDL_GPUSampleCount msaa_samples = SDL_GPU_SAMPLECOUNT_1;
+static int msaa_applied;                          // render_cfg.msaa the targets were made for
 static SDL_GPUTexture *tex_interp;                // in-between frame
 static SDL_GPUTexture *tex_disp;                  // 24-bit / software display path
 static SDL_GPUBuffer *vbuf;
@@ -50,7 +58,7 @@ static bool vram_dirty = true;
 bool widescreen_active;
 static int frame_precise_vertices;
 
-RenderConfig render_cfg = {.hw = true, .filter = false, .widescreen = false, .scale = 0, .interpolate = true};
+RenderConfig render_cfg = {.hw = true, .filter = true, .widescreen = true, .scale = 0, .interpolate = true, .msaa = 4};
 
 static SDL_GPUCommandBuffer *command_buffer(void) {
     if (!cmd && !(cmd = SDL_AcquireGPUCommandBuffer(dev))) host_fatal("GPU: %s", SDL_GetError());
@@ -130,8 +138,30 @@ static void begin_draw(int blend, int x, int y, int w, int h) {
 }
 
 static SDL_GPURenderPass *begin_pass(SDL_GPUTexture *target) {
-    SDL_GPUColorTargetInfo ct = {.texture = target, .load_op = SDL_GPU_LOADOP_LOAD, .store_op = SDL_GPU_STOREOP_STORE};
-    return SDL_BeginGPURenderPass(command_buffer(), &ct, 1, NULL);
+    if (msaa_samples == SDL_GPU_SAMPLECOUNT_1) {
+        SDL_GPUColorTargetInfo ct = {.texture = target, .load_op = SDL_GPU_LOADOP_LOAD, .store_op = SDL_GPU_STOREOP_STORE};
+        return SDL_BeginGPURenderPass(command_buffer(), &ct, 1, NULL);
+    }
+    SDL_GPUColorTargetInfo ct = {.texture = tex_msaa, .load_op = SDL_GPU_LOADOP_DONT_CARE,
+                                 .store_op = SDL_GPU_STOREOP_RESOLVE, .resolve_texture = tex_tmp};
+    SDL_GPURenderPass *rp = SDL_BeginGPURenderPass(command_buffer(), &ct, 1, NULL);
+    SDL_BindGPUGraphicsPipeline(rp, pipe_seed);
+    float whole[4] = {0, 0, 1, 1};
+    SDL_PushGPUVertexUniformData(command_buffer(), 0, whole, sizeof whole);
+    SDL_GPUTextureSamplerBinding b = {.texture = target, .sampler = smp_nearest};
+    SDL_BindGPUFragmentSamplers(rp, 0, &b, 1);
+    SDL_DrawGPUPrimitives(rp, 6, 1, 0, 0);
+    return rp;
+}
+
+// With MSAA the pass resolved into tex_tmp, which becomes the target.
+static void end_pass(SDL_GPURenderPass *rp, SDL_GPUTexture **target) {
+    SDL_EndGPURenderPass(rp);
+    if (msaa_samples != SDL_GPU_SAMPLECOUNT_1) {
+        SDL_GPUTexture *t = *target;
+        *target = tex_tmp;
+        tex_tmp = t;
+    }
 }
 
 static void bind_pixels(SDL_GPURenderPass *rp, SDL_GPUBuffer *b) {
@@ -169,8 +199,8 @@ static void copy_region(SDL_GPUTexture *from, int sx, int sy, SDL_GPUTexture *to
     SDL_EndGPUCopyPass(cp);
 }
 
-// Runs the recorded commands against `target` (tex_hi or tex_interp).
-static void execute(SDL_GPUTexture *target) {
+// Runs the recorded commands against *target (tex_hi or tex_interp).
+static void execute(SDL_GPUTexture **target) {
     if (!ncmds) { nverts = 0; return; }
     uint32_t vram_bytes = vram_dirty ? 1024 * 512 * 2 : 0, vert_bytes = (uint32_t)nverts * sizeof(GVtx);
     uint32_t px = 0;   // transferred pixels, packed one after the other
@@ -208,14 +238,14 @@ static void execute(SDL_GPUTexture *target) {
     for (int i = 0; i < ncmds; i++) {
         GCmd *c = &cmds[i];
         if (c->type == G_COPY) {
-            if (rp) { SDL_EndGPURenderPass(rp); rp = NULL; }
-            copy_region(target, c->x * scale, c->y * scale, tex_tmp, 0, 0, c->w * scale, c->h * scale);
-            copy_region(tex_tmp, 0, 0, target, c->dx * scale, c->dy * scale, c->w * scale, c->h * scale);
+            if (rp) { end_pass(rp, target); rp = NULL; }
+            copy_region(*target, c->x * scale, c->y * scale, tex_tmp, 0, 0, c->w * scale, c->h * scale);
+            copy_region(tex_tmp, 0, 0, *target, c->dx * scale, c->dy * scale, c->w * scale, c->h * scale);
             continue;
         }
         if (c->type == G_DRAW && !c->count) continue;
         if (!rp) {
-            rp = begin_pass(target);
+            rp = begin_pass(*target);
             bound = -3;
         }
         if (c->type == G_BLIT) {
@@ -244,7 +274,7 @@ static void execute(SDL_GPUTexture *target) {
         }
         if (set_scissor(rp, c->x, c->y, c->w, c->h)) SDL_DrawGPUPrimitives(rp, c->count, 1, c->first, 0);
     }
-    if (rp) SDL_EndGPURenderPass(rp);
+    if (rp) end_pass(rp, target);
     nverts = 0;
     ncmds = 0;
 }
@@ -257,6 +287,9 @@ void hw_set_draw_area(int x1, int y1, int x2, int y2) {
     pending.x1 = x1; pending.y1 = y1; pending.x2 = x2; pending.y2 = y2;
 }
 
+// Texture region the current primitive samples (umin | vmin << 8 | umax << 16 | vmax << 24):
+// bilinear filtering is kept inside it so neighbouring textures on the page do not bleed in.
+// It covers the whole primitive, so the triangles of a quad filter alike along their diagonal.
 static uint32_t cur_uvlim;
 
 static void push(GVtx *o, const HwVertex *v, const HwPrim *p, uint32_t pass) {
@@ -272,18 +305,6 @@ static void push(GVtx *o, const HwVertex *v, const HwPrim *p, uint32_t pass) {
 }
 
 static void draw_tri(const HwVertex v[3], const HwPrim *p) {
-    if (p->textured) {
-        float umin = v[0].u, umax = v[0].u, vmin = v[0].v, vmax = v[0].v;
-        for (int i = 1; i < 3; i++) {
-            umin = fminf(umin, v[i].u); umax = fmaxf(umax, v[i].u);
-            vmin = fminf(vmin, v[i].v); vmax = fmaxf(vmax, v[i].v);
-        }
-        // texel coordinates are floored, so the last texel of a span is max - 1 when max is fractional
-        int u0 = (int)umin, v0 = (int)vmin, u1 = (int)(umax - 0.001f), v1 = (int)(vmax - 0.001f);
-        if (u1 < u0) u1 = u0;
-        if (v1 < v0) v1 = v0;
-        cur_uvlim = (uint32_t)(u0 & 255) | ((uint32_t)(v0 & 255) << 8) | ((uint32_t)(u1 & 255) << 16) | ((uint32_t)(v1 & 255) << 24);
-    }
     int x = pending.x1, y = pending.y1, w = pending.x2 - pending.x1 + 1, h = pending.y2 - pending.y1 + 1;
     if (p->semi && p->textured) {
         // opaque texels first, then translucent ones with blending, keeping primitive order
@@ -648,7 +669,23 @@ static void compute_motion(void) {
 
 // Renders a recorded frame into `target`. With alpha < 1 vertices are moved back along the
 // motion field: alpha 0 is the previous frame's geometry, 1 the frame as recorded.
-static void render_ops(OpList *l, float alpha, SDL_GPUTexture *target) {
+static void set_uvlim(const OpList *l, int i) {
+    float umin = 1e9f, umax = -1e9f, vmin = 1e9f, vmax = -1e9f;
+    for (int j = i; j < l->n && l->ops[j].type == OP_TRI && l->ops[j].p.id == l->ops[i].p.id; j++)
+        for (int k = 0; k < 3; k++) {
+            const HwVertex *v = &l->ops[j].v[k];
+            umin = fminf(umin, v->u); umax = fmaxf(umax, v->u);
+            vmin = fminf(vmin, v->v); vmax = fmaxf(vmax, v->v);
+        }
+    // texel coordinates are floored, so the last texel of a span is max - 1 when max is fractional
+    int u0 = (int)umin, v0 = (int)vmin, u1 = (int)(umax - 0.001f), v1 = (int)(vmax - 0.001f);
+    if (u1 < u0) u1 = u0;
+    if (v1 < v0) v1 = v0;
+
+    cur_uvlim = (uint32_t)(u0 & 255) | ((uint32_t)(v0 & 255) << 8) | ((uint32_t)(u1 & 255) << 16) | ((uint32_t)(v1 & 255) << 24);
+}
+
+static void render_ops(OpList *l, float alpha, SDL_GPUTexture **target) {
     bool moved = alpha < 1.0f;
     float back = 1.0f - alpha;
     int ax1 = pending.x1, ay1 = pending.y1, ax2 = pending.x2, ay2 = pending.y2;
@@ -673,6 +710,8 @@ static void render_ops(OpList *l, float alpha, SDL_GPUTexture *target) {
                         if (!motion[i * 3 + k].state) { v[k].x += sx / nm; v[k].y += sy / nm; }
             }
             pending.x1 = o->a[0]; pending.y1 = o->a[1]; pending.x2 = o->a[2]; pending.y2 = o->a[3];
+            if (o->p.textured && (i == 0 || l->ops[i - 1].type != OP_TRI || l->ops[i - 1].p.id != o->p.id))
+                set_uvlim(l, i);
             draw_tri(v, &o->p);
             break;
         }
@@ -696,11 +735,30 @@ static void render_pending(void) {
     if (!frame_ops.n) return;
     resolve_frame(&frame_ops);
     widescreen_frame(&frame_ops);
-    render_ops(&frame_ops, 1.0f, tex_hi);
+    render_ops(&frame_ops, 1.0f, &tex_hi);
     clear_ops(&frame_ops);
     clear_ops(&prev_ops);
     frame_has_keys = false;
     motion_valid = false;
+}
+
+// Debug aid: CMR_DUMP_HW=<frame> logs the triangles of the first flip from that frame on, as the
+// renderer draws them.
+static void dump_frame(OpList *l) {
+    static long want = -2;
+    if (want == -2) want = getenv("CMR_DUMP_HW") ? atol(getenv("CMR_DUMP_HW")) : -1;
+    if (want < 0 || (long)(cpu.cycles / CYCLES_PER_FRAME) < want) return;
+    want = -1;
+    for (int i = 0; i < l->n; i++) {
+        Op *o = &l->ops[i];
+        if (o->type != OP_TRI) continue;
+        LOG("[hw] %d id=%u kind=%d semi=%d tex=%d page=%d,%d win=%05x area=%d,%d", i, o->p.id, o->p.kind, o->p.semi,
+            o->p.textured, o->p.tex_x, o->p.tex_y, o->p.texwin, o->a[0], o->a[1]);
+        for (int k = 0; k < 3; k++)
+            LOG(" (%.3f,%.3f w=%.1f %s uv=%.2f,%.2f)", o->v[k].x - o->a[0], o->v[k].y - o->a[1], o->v[k].w,
+                o->v[k].precise ? "p" : "i", o->v[k].u, o->v[k].v);
+        LOG("\n");
+    }
 }
 
 void hw_flip(void) {
@@ -710,7 +768,8 @@ void hw_flip(void) {
     resolve_frame(&frame_ops);
     widescreen_frame(&frame_ops);
     update_widescreen();
-    render_ops(&frame_ops, 1.0f, tex_hi);
+    dump_frame(&frame_ops);
+    render_ops(&frame_ops, 1.0f, &tex_hi);
     motion_valid = render_cfg.interpolate && last_interval >= 2 && last_interval <= 4 && frame_has_keys && prev_ops.n;
     if (motion_valid) compute_motion();
     clear_ops(&prev_ops);
@@ -727,9 +786,11 @@ static SDL_GPUTexture *make_texture(SDL_GPUTextureFormat fmt, int w, int h, SDL_
     return SDL_CreateGPUTexture(dev, &ci);
 }
 
+static void create_draw_pipelines(void);
+
 static void release_targets(void) {
-    SDL_GPUTexture **t[3] = {&tex_hi, &tex_tmp, &tex_interp};
-    for (int i = 0; i < 3; i++)
+    SDL_GPUTexture **t[4] = {&tex_hi, &tex_tmp, &tex_interp, &tex_msaa};
+    for (int i = 0; i < 4; i++)
         if (*t[i]) { SDL_ReleaseGPUTexture(dev, *t[i]); *t[i] = NULL; }
 }
 
@@ -744,13 +805,32 @@ static void create_targets(void) {
         if (tex_hi && tex_tmp && tex_interp) break;
         if (scale == 1) host_fatal("GPU: cannot create the render targets: %s", SDL_GetError());
     }
+    // the most samples (up to the number wanted) the GPU supports at this size
+    msaa_applied = render_cfg.msaa;
+    SDL_GPUSampleCount want = render_cfg.msaa >= 8 ? SDL_GPU_SAMPLECOUNT_8 : render_cfg.msaa >= 4 ? SDL_GPU_SAMPLECOUNT_4
+                            : render_cfg.msaa >= 2 ? SDL_GPU_SAMPLECOUNT_2 : SDL_GPU_SAMPLECOUNT_1;
+    for (; want != SDL_GPU_SAMPLECOUNT_1; want--) {
+        if (!SDL_GPUTextureSupportsSampleCount(dev, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, want)) continue;
+        SDL_GPUTextureCreateInfo ci = {.type = SDL_GPU_TEXTURETYPE_2D, .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+                                       .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET, .width = (Uint32)(1024 * scale),
+                                       .height = (Uint32)(512 * scale), .layer_count_or_depth = 1, .num_levels = 1,
+                                       .sample_count = want};
+        if ((tex_msaa = SDL_CreateGPUTexture(dev, &ci))) break;
+    }
+    if (want != msaa_samples || !pipe_blit) {
+        msaa_samples = want;
+        create_draw_pipelines();
+    }
+    LOG("[render] internal resolution %dx%d (%dx), %s\n", 1024 * scale, 512 * scale, scale,
+        msaa_samples == SDL_GPU_SAMPLECOUNT_1 ? "no anti-aliasing"
+        : msaa_samples == SDL_GPU_SAMPLECOUNT_2 ? "2x MSAA" : msaa_samples == SDL_GPU_SAMPLECOUNT_4 ? "4x MSAA" : "8x MSAA");
     clear_ops(&frame_ops);
     clear_ops(&prev_ops);
     ncmds = nverts = 0;
     // seed the new target with the current 1x VRAM
     vram_dirty = true;
     blit_from_vram(0, 0, 1024, 512);
-    execute(tex_hi);
+    execute(&tex_hi);
 }
 
 static int wanted_scale(void) {
@@ -779,7 +859,7 @@ static SDL_GPUShader *shader(const uint8_t *spv, size_t spv_size, const uint8_t 
 
 // blend: -1 none, 0-3 PlayStation semi-transparency mode
 static SDL_GPUGraphicsPipeline *pipeline(SDL_GPUShader *vs, SDL_GPUShader *fs, SDL_GPUTextureFormat format, int blend,
-                                         bool vertices) {
+                                         bool vertices, SDL_GPUSampleCount samples) {
     SDL_GPUColorTargetDescription ct = {.format = format};
     if (blend >= 0) {
         SDL_GPUColorTargetBlendState *b = &ct.blend_state;
@@ -805,6 +885,7 @@ static SDL_GPUGraphicsPipeline *pipeline(SDL_GPUShader *vs, SDL_GPUShader *fs, S
         .fragment_shader = fs,
         .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
         .rasterizer_state = {.fill_mode = SDL_GPU_FILLMODE_FILL, .cull_mode = SDL_GPU_CULLMODE_NONE},
+        .multisample_state = {.sample_count = samples},
         .target_info = {.color_target_descriptions = &ct, .num_color_targets = 1},
     };
     if (vertices) {
@@ -818,6 +899,18 @@ static SDL_GPUGraphicsPipeline *pipeline(SDL_GPUShader *vs, SDL_GPUShader *fs, S
     return p;
 }
 
+// Pipelines drawing into the high-resolution target, for the sample count in use.
+static void create_draw_pipelines(void) {
+    SDL_GPUGraphicsPipeline **all[7] = {&pipe_draw[0], &pipe_draw[1], &pipe_draw[2], &pipe_draw[3], &pipe_draw[4],
+                                        &pipe_blit, &pipe_seed};
+    for (int i = 0; i < 7; i++)
+        if (*all[i]) { SDL_ReleaseGPUGraphicsPipeline(dev, *all[i]); *all[i] = NULL; }
+    const SDL_GPUTextureFormat f = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    for (int i = 0; i < 5; i++) pipe_draw[i] = pipeline(draw_vs, draw_fs, f, i - 1, true, msaa_samples);
+    pipe_blit = pipeline(blit_vs, blit_fs, f, -1, false, msaa_samples);
+    if (msaa_samples != SDL_GPU_SAMPLECOUNT_1) pipe_seed = pipeline(present_vs, present_fs, f, -1, false, msaa_samples);
+}
+
 bool render_init(SDL_Window *window) {
     win = window;
     dev = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_MSL, getenv("CMR_GPU_DEBUG") != NULL, NULL);
@@ -825,18 +918,14 @@ bool render_init(SDL_Window *window) {
     if (!SDL_ClaimWindowForGPUDevice(dev, win)) { LOG("GPU: %s\n", SDL_GetError()); return false; }
     LOG("[render] SDL_GPU %s\n", SDL_GetGPUDeviceDriver(dev));
 
-    SDL_GPUShader *draw_vs = SHADER(draw_vert, SDL_GPU_SHADERSTAGE_VERTEX, 0, 0, 0);
-    SDL_GPUShader *draw_fs = SHADER(draw_frag, SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 1, 0);
-    SDL_GPUShader *blit_vs = SHADER(blit_vert, SDL_GPU_SHADERSTAGE_VERTEX, 0, 0, 1);
-    SDL_GPUShader *blit_fs = SHADER(blit_frag, SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 1, 0);
-    SDL_GPUShader *present_vs = SHADER(present_vert, SDL_GPU_SHADERSTAGE_VERTEX, 0, 0, 1);
-    SDL_GPUShader *present_fs = SHADER(present_frag, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, 0);
-    for (int i = 0; i < 5; i++)
-        pipe_draw[i] = pipeline(draw_vs, draw_fs, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, i - 1, true);
-    pipe_blit = pipeline(blit_vs, blit_fs, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, -1, false);
-    pipe_present = pipeline(present_vs, present_fs, SDL_GetGPUSwapchainTextureFormat(dev, win), -1, false);
-    SDL_GPUShader *all[6] = {draw_vs, draw_fs, blit_vs, blit_fs, present_vs, present_fs};
-    for (int i = 0; i < 6; i++) SDL_ReleaseGPUShader(dev, all[i]);
+    draw_vs = SHADER(draw_vert, SDL_GPU_SHADERSTAGE_VERTEX, 0, 0, 0);
+    draw_fs = SHADER(draw_frag, SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 1, 0);
+    blit_vs = SHADER(blit_vert, SDL_GPU_SHADERSTAGE_VERTEX, 0, 0, 1);
+    blit_fs = SHADER(blit_frag, SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 1, 0);
+    present_vs = SHADER(present_vert, SDL_GPU_SHADERSTAGE_VERTEX, 0, 0, 1);
+    present_fs = SHADER(present_frag, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, 0);
+    pipe_present = pipeline(present_vs, present_fs, SDL_GetGPUSwapchainTextureFormat(dev, win), -1, false,
+                            SDL_GPU_SAMPLECOUNT_1);
 
     SDL_GPUSamplerCreateInfo sc = {.min_filter = SDL_GPU_FILTER_LINEAR, .mag_filter = SDL_GPU_FILTER_LINEAR,
                                    .mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
@@ -844,17 +933,18 @@ bool render_init(SDL_Window *window) {
                                    .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
                                    .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE};
     smp_linear = SDL_CreateGPUSampler(dev, &sc);
+    sc.min_filter = sc.mag_filter = SDL_GPU_FILTER_NEAREST;
+    smp_nearest = SDL_CreateGPUSampler(dev, &sc);
 
     buf_vram = make_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, 1024 * 512 * 2);
     tex_disp = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 640, 512, SDL_GPU_TEXTUREUSAGE_SAMPLER);
-    if (!smp_linear || !tex_disp) {
+    if (!smp_linear || !smp_nearest || !tex_disp) {
         LOG("GPU: %s\n", SDL_GetError());
         return false;
     }
     ready = true;
     scale = wanted_scale();
     create_targets();
-    LOG("[render] internal resolution %dx%d (%dx)\n", 1024 * scale, 512 * scale, scale);
     return true;
 }
 
@@ -909,7 +999,7 @@ void render_present(const DisplayInfo *d, const uint32_t *rgba_1x, float alpha) 
         interp_pending = motion_valid && alpha < 1.0f;
         if (interp_pending) {
             copy_region(tex_hi, 0, 0, tex_interp, 0, 0, 1024 * scale, 512 * scale);
-            render_ops(&prev_ops, alpha, tex_interp);
+            render_ops(&prev_ops, alpha, &tex_interp);
         }
         src = interp_pending ? tex_interp : tex_hi;
         rect[0] = d->x / 1024.0f; rect[1] = d->y / 512.0f; rect[2] = d->w / 1024.0f; rect[3] = d->h / 512.0f;
@@ -940,10 +1030,9 @@ void render_present(const DisplayInfo *d, const uint32_t *rgba_1x, float alpha) 
     SDL_SubmitGPUCommandBuffer(cb);
     cmd = NULL;
     int s = wanted_scale();
-    if (s != scale && render_cfg.hw) {
+    if ((s != scale || render_cfg.msaa != msaa_applied) && render_cfg.hw) {
         scale = s;
         create_targets();
-        LOG("[render] internal resolution %dx%d (%dx)\n", 1024 * scale, 512 * scale, scale);
     }
 }
 

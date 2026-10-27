@@ -37,6 +37,7 @@ typedef struct {
     bool widescreen;  // 16:9 output with the GTE projection widened to match
     int scale;        // internal resolution multiplier, 0 = match the window
     bool interpolate; // generate in-between frames when the game renders below 60 fps
+    int msaa;         // anti-aliasing samples: 1 (off), 2, 4 or 8
 } RenderConfig;
 extern RenderConfig render_cfg;
 extern bool widescreen_active;   // widescreen applies to the current frames (3D gameplay)

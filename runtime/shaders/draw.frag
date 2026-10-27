@@ -2,8 +2,8 @@
 // v_tex: x = texpage x | y << 16, y = clut x | y << 16, z = texture window, w = flags
 // flags: 0-1 depth, 2 textured, 3 raw, 4-5 pass (0 all, 1 opaque texels, 2 translucent texels),
 //        6 bilinear filtering
-layout(location = 0) in vec4 v_col;
-layout(location = 1) in vec2 v_uv;
+layout(location = 0) centroid in vec4 v_col;
+layout(location = 1) centroid in vec2 v_uv;
 layout(location = 2) flat in uvec4 v_tex;
 layout(location = 3) flat in uint v_uvlim;
 // 1x VRAM, two 16-bit pixels per word (integer textures cannot be sampled in SDL_GPU)
@@ -59,8 +59,11 @@ void main() {
             t = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
             if (t.a < 0.5) discard;
             t.rgb /= t.a;
-            uint tn = texel(ivec2(floor(v_uv)));
-            stp = (tn & 0x8000u) != 0u;
+            // semi-transparent if most of the visible texels mixed here are (the nearest texel
+            // alone may be a transparent one at the edge of a translucent shape)
+            vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+            float s = dot(w, vec4((t00 & 0x8000u) != 0u, (t10 & 0x8000u) != 0u, (t01 & 0x8000u) != 0u, (t11 & 0x8000u) != 0u));
+            stp = s >= 0.5 * t.a;
         } else {
             uint tn = texel(ivec2(floor(v_uv)));
             if (tn == 0u) discard;

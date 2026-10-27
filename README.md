@@ -15,9 +15,12 @@ This is an unofficial fan project, not affiliated with Codemasters or Sony.
   in true colour (up to 16x the original 320x240)
 - Sub-pixel vertex precision and perspective-correct texturing (no polygon wobble or
   texture warping), from the GTE's unrounded results
-- Optional 16:9 widescreen in races: wider 3D field of view, HUD kept at its original
+- 16:9 widescreen in races (default): wider 3D field of view, HUD kept at its original
   proportions and anchored to the screen edges; menus and videos are shown pillarboxed
-- Optional bilinear texture filtering
+- Bilinear texture filtering (default), kept inside each primitive's texture region so
+  neighbouring textures on the PlayStation's texture pages do not bleed in
+- Multisample anti-aliasing, 4x by default (2x/8x/off), for clean polygon edges at any
+  resolution
 - Gamepads (anything SDL3 supports) act as a DualShock: analog stick steering and
   vibration, as on the original hardware; a Namco NeGcon mode adds analog throttle/brake
 - Smooth races at the refresh rate of the monitor the window is on (60, 75, 120, 144,
@@ -93,7 +96,8 @@ in the pause menu.
 
 Hotkeys: F11 or Alt+Enter fullscreen, F2 texture filtering, F3 dithering (original
 renderer), F4 high-resolution vs original renderer, F5 sub-pixel precision, F6 frame
-interpolation, F7 DualShock ANALOG button, Tab fast-forward, Shift+Esc quit.
+interpolation, F7 DualShock ANALOG button, F8 anti-aliasing (off/2x/4x/8x), Tab
+fast-forward, Shift+Esc quit.
 
 ## Options
 
@@ -101,8 +105,9 @@ interpolation, F7 DualShock ANALOG button, Tab fast-forward, Shift+Esc quit.
 --fullscreen      start fullscreen
 --window N        window size as a multiple of 320x240 (default 3)
 --scale N         internal resolution multiplier (default: match the window)
---widescreen      16:9 output with a widened 3D projection
---filter          bilinear texture filtering
+--no-widescreen   4:3 as on the console (default: 16:9 with a widened 3D projection)
+--no-filter       no bilinear texture filtering
+--msaa N          anti-aliasing samples: 0 (off), 2, 4 (default) or 8
 --software        original 1x software renderer
 --no-pgxp         disable sub-pixel vertex precision
 --no-vsync        do not sync presentation to the display
@@ -135,7 +140,9 @@ Settings and memory cards live in the user preferences folder
   timers and the controller port.
 - `runtime/render_gpu.c` redraws each frame at high resolution when the game flips its
   display, through SDL_GPU: a frame's vertices and texture uploads go to the GPU in one copy
-  pass and are drawn in a single render pass where possible. The shaders
+  pass and are drawn in a single render pass where possible. With anti-aliasing, each pass
+  draws into a multisampled texture seeded from the current image and resolves back, so the
+  samples never leave the GPU's tile memory on tile-based GPUs. The shaders
   (`runtime/shaders/`) are compiled to SPIR-V and Metal by `tools/build_shaders.py` (glslc,
   spirv-cross) into `runtime/gpu_shaders.h`, which is committed, so building the game does
   not need those tools. `SDL_GPU_DRIVER=vulkan` forces Vulkan where Metal is the default
@@ -164,4 +171,5 @@ with callers), `CMR_WATCH=addr,...` (log RAM word changes per vblank),
 at exit), `CMR_ANALOG_AT=<frame>` (press ANALOG on port 1), `CMR_GPU_DEBUG=1` (SDL_GPU
 debug mode with the Vulkan validation layers when installed), `CMR_REFRESH_HZ=<hz>` (pretend
 the monitor runs at that rate), `CMR_TRACE_LOAD=1` (log when the CD is loading, streaming or
-playing music, which drives fast loading).
+playing music, which drives fast loading), `CMR_DUMP_HW=<frame>` (the triangles of one frame
+as the renderer draws them).

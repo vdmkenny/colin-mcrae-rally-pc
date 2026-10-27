@@ -271,6 +271,9 @@ static void handle_events(void) {
                 fast_forward = true;
             } else if (e.key.scancode == SDL_SCANCODE_F2) {
                 render_cfg.filter = !render_cfg.filter;
+            } else if (e.key.scancode == SDL_SCANCODE_F8) {
+                render_cfg.msaa = render_cfg.msaa >= 8 ? 1 : render_cfg.msaa * 2;
+                LOG("[render] anti-aliasing %s\n", render_cfg.msaa > 1 ? (render_cfg.msaa == 2 ? "2x" : render_cfg.msaa == 4 ? "4x" : "8x") : "off");
             } else if (e.key.scancode == SDL_SCANCODE_F3) {
                 gpu_dither_enabled = !gpu_dither_enabled;
             } else if (e.key.scancode == SDL_SCANCODE_F4) {
@@ -609,6 +612,13 @@ static const char *find_cue(void) {
 // ----------------------------------------------------------------- settings
 static char settings_path[1100];
 
+// Version 2 made texture filtering, widescreen and anti-aliasing the defaults; older files saved
+// the previous defaults without anyone choosing them.
+#define SETTINGS_VERSION 2
+static int settings_version;
+
+static int msaa_setting(int n) { return n >= 8 ? 8 : n >= 4 ? 4 : n >= 2 ? 2 : 1; }
+
 static void apply_setting(const char *k, const char *v) {
     int n = atoi(v);
     if (!strcmp(k, "fullscreen")) opts.fullscreen = n;
@@ -617,6 +627,8 @@ static void apply_setting(const char *k, const char *v) {
     else if (!strcmp(k, "hires")) render_cfg.hw = n;
     else if (!strcmp(k, "filter")) render_cfg.filter = n;
     else if (!strcmp(k, "widescreen")) render_cfg.widescreen = n;
+    else if (!strcmp(k, "msaa")) render_cfg.msaa = msaa_setting(n);
+    else if (!strcmp(k, "settings_version")) settings_version = n;
     else if (!strcmp(k, "pgxp")) pgxp_enabled = n;
     else if (!strcmp(k, "interpolation")) render_cfg.interpolate = n;
     else if (!strcmp(k, "vsync")) vsync = n;
@@ -644,12 +656,17 @@ static void load_settings(void) {
         apply_setting(k, v);
     }
     fclose(f);
+    if (settings_version < 2) {
+        render_cfg.filter = true;
+        render_cfg.widescreen = true;
+    }
 }
 
 static void save_settings(void) {
     FILE *f = fopen(settings_path, "w");
     if (!f) return;
     fprintf(f, "# Colin McRae Rally PC settings (also changeable with hotkeys and command-line options)\n");
+    fprintf(f, "settings_version = %d\nmsaa = %d\n", SETTINGS_VERSION, render_cfg.msaa);
     fprintf(f, "fullscreen = %d\nwindow = %d\nscale = %d\nhires = %d\nfilter = %d\nwidescreen = %d\n",
             opts.fullscreen, opts.scale, render_cfg.scale, render_cfg.hw, render_cfg.filter, render_cfg.widescreen);
     fprintf(f, "interpolation = %d\nrumble = %d\nfast_loading = %d\n", render_cfg.interpolate, rumble_enabled,
@@ -673,8 +690,9 @@ static void usage(void) {
             "  --no-dither         disable PlayStation dithering (toggle with F3)\n"
             "  --software          show the original 1x software renderer (toggle with F4)\n"
             "  --scale N           internal resolution multiplier (default: match the window)\n"
-            "  --filter            bilinear texture filtering (toggle with F2)\n"
-            "  --widescreen        16:9 with a widened 3D projection\n"
+            "  --no-filter         no bilinear texture filtering (toggle with F2)\n"
+            "  --no-widescreen     4:3 as on the console (16:9 with a widened 3D view by default)\n"
+            "  --msaa N            anti-aliasing samples: 0 (off), 2, 4 (default) or 8 (cycle with F8)\n"
             "  --no-pgxp           disable sub-pixel vertex precision (toggle with F5)\n"
             "  --no-vsync          do not sync presentation to the display\n"
             "  --no-interpolation  show only the game's own frames (30 fps in races)\n"
@@ -697,7 +715,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) render_cfg.scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--software")) render_cfg.hw = false;
         else if (!strcmp(argv[i], "--filter")) render_cfg.filter = true;
+        else if (!strcmp(argv[i], "--no-filter")) render_cfg.filter = false;
         else if (!strcmp(argv[i], "--widescreen")) render_cfg.widescreen = true;
+        else if (!strcmp(argv[i], "--no-widescreen")) render_cfg.widescreen = false;
+        else if (!strcmp(argv[i], "--msaa") && i + 1 < argc) render_cfg.msaa = msaa_setting(atoi(argv[++i]));
         else if (!strcmp(argv[i], "--no-pgxp")) pgxp_enabled = false;
         else if (!strcmp(argv[i], "--no-vsync")) vsync = false;
         else if (!strcmp(argv[i], "--no-interpolation")) render_cfg.interpolate = false;

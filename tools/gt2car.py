@@ -18,7 +18,6 @@ import copy
 import gzip
 import math
 import os
-import random
 import struct
 import sys
 
@@ -240,23 +239,45 @@ def cross(a, b):
     return a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]
 
 
-def triangles(lod, dy):
-    """GT2 faces as game-axis triangles wound the game's way:
-    [(corners [(position, normal)], uvs, palette, colour)]."""
+def triangles(lod, dy, transparent):
+    """GT2 faces as game-axis triangles: [(corners [(position, normal)], uvs, palette, colour,
+    decal)]. GT2 winds every face outward the same way, which the change of axes mirrors.
+    Corners whose smoothed normals point inward get the face's own. A decal (a lamp) is drawn
+    over another face on the same corners: the one with transparent texels, else the first."""
     out = []
     verts = [to_game(v, dy) for v in lod["vertices"]]
+    corners = collections.Counter(tuple(sorted(f["verts"])) for f in lod["faces"])
+    first = set()
     for f in lod["faces"]:
-        order = [(0, 1, 2), (0, 2, 3)] if len(f["verts"]) == 4 else [(0, 1, 2)]
+        key = tuple(sorted(f["verts"]))
+        decal = False
+        if corners[key] > 1:
+            twins = [g for g in lod["faces"] if tuple(sorted(g["verts"])) == key]
+            holes = [transparent(g) for g in twins]
+            decal = transparent(f) if any(holes) and not all(holes) else key not in first
+            first.add(key)
+        order = [(0, 2, 1), (0, 3, 2)] if len(f["verts"]) == 4 else [(0, 2, 1)]
         for t in order:
             pos = [verts[f["verts"][i]] for i in t]
             face_n = norm(cross([b - a for a, b in zip(pos[0], pos[1])], [b - a for a, b in zip(pos[0], pos[2])]))
             ns = [norm(to_game(f["normals"][i])) if f["normals"][i] else face_n for i in t]
-            uvs = [f["uvs"][i] for i in t] if f["uvs"] else None
             if sum(sum(a * b for a, b in zip(face_n, n)) for n in ns) < 0:
-                pos, ns = [pos[0], pos[2], pos[1]], [ns[0], ns[2], ns[1]]
-                uvs = uvs and [uvs[0], uvs[2], uvs[1]]
-            out.append((list(zip(pos, ns)), uvs, f["palette"], f["colour"]))
+                ns = [face_n] * 3
+            uvs = [f["uvs"][i] for i in t] if f["uvs"] else None
+            out.append((list(zip(pos, ns)), uvs, f["palette"], f["colour"], decal))
     return out
+
+
+def transparent_texels(paint):
+    """Whether a face's texture area has transparent texels."""
+    def test(f):
+        if not f["uvs"]:
+            return False
+        pal = paint["palettes"][f["palette"]]
+        us, vs = [u for u, _ in f["uvs"]], [v for _, v in f["uvs"]]
+        return any(not pal[paint["pixels"][v * 256 + u]] & 0x7fff
+                   for v in range(min(vs), min(223, max(vs)) + 1) for u in range(min(us), max(us) + 1))
+    return test
 
 
 def classify(tris, panels):
@@ -264,7 +285,7 @@ def classify(tris, panels):
     11 panels, the disc cars' layout: arches and dark parts, left, right, underbody, roof and
     windscreen, rear window and hatch, bonnet and headlights, front bumper, left and right tail
     lights, rear bumper. With 4 (MEDIUM): dark parts, left, right, the rest."""
-    pts = [p for c, _, _, _ in tris for p, _ in c]
+    pts = [p for t in tris for p, _ in t[0]]
     x0, x1 = min(p[0] for p in pts), max(p[0] for p in pts)
     y0, y1 = min(p[1] for p in pts), max(p[1] for p in pts)
     zw = max(abs(p[2]) for p in pts)
@@ -298,10 +319,18 @@ def vertex(pos, n):
                          round(n[0] * 4096), round(n[1] * 4096), round(n[2] * 4096))
 
 
-def panel_mesh(tris, tex_of, seed):
+def dent(v):
+    """The fully damaged position: up to 9 cm in towards the car's middle, the same for every
+    panel's copy of a corner, so decals stay on what they cover."""
+    d = math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z) or 1
+    k = (1 + hash((v.x, v.y, v.z)) % 3) / d
+    return cmrcar.Vertex(v.x - round(v.x * k), v.y - round(v.y * k), v.z - round(v.z * k), v.nx, v.ny, v.nz)
+
+
+def panel_mesh(tris, tex_of, zbias=1):
     """A body panel: the live, dented and pristine damage states."""
     verts, index, g3, gt3 = [], {}, [], []
-    for corners, uvs, palette, colour in tris:
+    for corners, uvs, palette, colour, _ in tris:
         ids = []
         for pos, n in corners:
             v = vertex(pos, n)
@@ -317,15 +346,13 @@ def panel_mesh(tris, tex_of, seed):
         verts, g3 = [cmrcar.Vertex()], [cmrcar.FaceG3([0, 0, 0], 0x30060606)]
     if len(verts) > cmrcar.MAX_VERTS_PER_BLOCK:
         sys.exit(f"a body panel has {len(verts)} vertices; the game allows {cmrcar.MAX_VERTS_PER_BLOCK}")
-    rnd = random.Random(seed)
-    dented = [cmrcar.Vertex(v.x - round(v.nx * rnd.uniform(1, 3) / 4096), v.y - round(v.ny * rnd.uniform(1, 3) / 4096),
-                            v.z - round(v.nz * rnd.uniform(1, 3) / 4096), v.nx, v.ny, v.nz) for v in verts]
+    dented = [dent(v) for v in verts]
     faces = lambda: cmrcar.FaceBlock(list(g3), list(gt3))   # noqa: E731
     pristine = [cmrcar.Vertex.unpack(v.pack(), 0) for v in verts]
     mesh = cmrcar.Mesh([cmrcar.Lod(faces(), cmrcar.VertBlock(verts)),
                         cmrcar.Lod(faces(), cmrcar.VertBlock(dented)),
                         cmrcar.Lod(faces(), cmrcar.VertBlock(pristine))])
-    mesh.radius = cmrcar.mesh_radius(mesh)
+    mesh.radius, mesh.zbias = cmrcar.mesh_radius(mesh), zbias
     return mesh
 
 
@@ -414,9 +441,9 @@ def tex_index(scene, tp, cl):
     return scene.tex.index((tp, cl))
 
 
-def exterior(gt2, base, texels, palette_tex, panels, wheel_scale, lod, rim):
+def exterior(gt2, paint, base, texels, palette_tex, panels, wheel_scale, lod, rim):
     """Chunk 0: root, wheels (the base car's, resized, rims to `rim` inches), body group, body
-    panels."""
+    panels, and the decals in a last panel drawn one step nearer, over what they cover."""
     bw = next(n for n in base.nodes if n.id & 0xfff == 1)
     bmesh = base.meshes[bw.mesh]
     bverts = bmesh.lods[0].verts.verts
@@ -438,14 +465,17 @@ def exterior(gt2, base, texels, palette_tex, panels, wheel_scale, lod, rim):
     wheel.radius, wheel.zbias = cmrcar.mesh_radius(wheel), bmesh.zbias
     s.meshes.append(wheel)
     s.nodes.append(cmrcar.Node(id=0))
-    for wx, wy, wz, _, _ in gt2["wheels"]:
-        s.nodes.append(cmrcar.Node(id=len(s.nodes), mesh=0, parent=0, base=place(*to_game((wx, wy, wz), dy))))
+    for wx, wy, wz, _, ww in gt2["wheels"]:   # GT2's x is the wheel's outer face
+        centre = (wx - math.copysign(ww / 2, wx), wy, wz)
+        s.nodes.append(cmrcar.Node(id=len(s.nodes), mesh=0, parent=0, base=place(*to_game(centre, dy))))
     s.nodes.append(cmrcar.Node(id=5, parent=0))
-    tris = triangles(gt2["lods"][lod], dy)
-    for i, part in enumerate(classify(tris, panels)):
-        s.meshes.append(panel_mesh(part, lambda p: tex_index(s, *palette_tex(p)), i))
+    tris = triangles(gt2["lods"][lod], dy, transparent_texels(paint))
+    parts = classify([t for t in tris if not t[4]], panels)
+    decals = [t for t in tris if t[4]]
+    for i, part in enumerate(parts + ([decals] if decals else [])):
+        s.meshes.append(panel_mesh(part, lambda p: tex_index(s, *palette_tex(p)), 0 if i == len(parts) else 1))
         s.nodes.append(cmrcar.Node(id=6 + i, mesh=len(s.meshes) - 1, parent=5))
-    pts = [p for c, _, _, _ in tris for p, _ in c]
+    pts = [p for t in tris for p, _ in t[0]]
     s.meshes[1].extents = tuple(round((max(p[i] for p in pts) - min(p[i] for p in pts)) / 2 * FIX) for i in range(3))
     s.link()
     return s, dy
@@ -454,13 +484,13 @@ def exterior(gt2, base, texels, palette_tex, panels, wheel_scale, lod, rim):
 def hull(gt2, base_hull, dy):
     """Chunk 1: the shine shell, GT2's least detailed model shrunk inside the body."""
     s = copy.deepcopy(base_hull)
-    tris = triangles(gt2["lods"][-1], dy)
-    pts = [p for c, _, _, _ in tris for p, _ in c]
+    tris = triangles(gt2["lods"][-1], dy, lambda f: False)
+    pts = [p for t in tris for p, _ in t[0]]
     mid = [(max(p[i] for p in pts) + min(p[i] for p in pts)) / 2 for i in range(3)]
     # the base hull's node maps local axes onto the car's; undo that so ours sits in car axes
     s.nodes[0].base = s.nodes[0].local = place(0, 0, 0)
     verts, index, faces = [], {}, []
-    for corners, _, _, _ in tris:
+    for corners, *_ in tris:
         ids = []
         for pos, _ in corners:
             p = [m + (c - m) * 0.9 for c, m in zip(pos, mid)]
@@ -507,7 +537,7 @@ def car_files(gt2, paint, base, kind, rim):
     src.load_texfile(tims)
     rows = iter(range(32, 60, 2))
     texels = Texels(src, (848, 0, 896, 255), [(832, next(rows)) for _ in range(12)])
-    chunk0, dy = exterior(gt2, model.scenes[0], texels, lambda p: (PAGE14, clut_word(832, 2 * p)), 11, 1.0, 0, rim)
+    chunk0, dy = exterior(gt2, paint, model.scenes[0], texels, lambda p: (PAGE14, clut_word(832, 2 * p)), 11, 1.0, 0, rim)
     scenes = [chunk0, hull(gt2, model.scenes[1], dy)]
     for i, s in enumerate(model.scenes[2:]):
         s = copy.deepcopy(s)
@@ -533,7 +563,7 @@ def medium_files(gt2, paint, base, rim):
     slots = [(832 + 16 * (k % 4), 224 + 2 * (k // 4)) for k in range(20)]
     texels = Texels(src, (832, 234, 896, 255), slots[16:])
     day = base["DAY.BFX"].scenes[0]
-    chunk0, dy = exterior(gt2, day, texels, lambda p: (PAGE13, clut_word(*slots[p])), 4, 20 / 64, 1, rim)
+    chunk0, dy = exterior(gt2, paint, day, texels, lambda p: (PAGE13, clut_word(*slots[p])), 4, 20 / 64, 1, rim)
     scenes = [chunk0, hull(gt2, model.scenes[1], dy)]
     block = cmrcar.VRAM()
     for k in range(16):

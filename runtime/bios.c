@@ -9,7 +9,12 @@ void psx_exec(uint32_t entry, uint32_t sp, uint32_t gp, uint32_t a0, uint32_t a1
 
 static inline uint32_t ram32(uint32_t a) { uint32_t v; memcpy(&v, psx_ram + (a & 0x1FFFFC), 4); return v; }
 static inline void wram32(uint32_t a, uint32_t v) { memcpy(psx_ram + (a & 0x1FFFFC), &v, 4); }
-static const char *ram_str(uint32_t a) { return (const char *)psx_ram + (a & 0x1FFFFF); }
+// Guest memory for BIOS arguments: main RAM or the scratchpad.
+static uint8_t *guest_ptr(uint32_t a) {
+    if ((a & 0x1FFFFC00) == 0x1F800000) return psx_scratch + (a & 0x3FF);
+    return psx_ram + (a & 0x1FFFFF);
+}
+static const char *ram_str(uint32_t a) { return (const char *)guest_ptr(a); }
 
 // -------------------------------------------------------------------- events
 #define MAX_EVENTS 32
@@ -181,7 +186,7 @@ static void mc_flush(MemCard *m) {
 static void mc_init(int port) {
     MemCard *m = &cards[port];
     if (m->present) return;
-    snprintf(m->path, sizeof m->path, "%s/memcard%d.mcd", save_dir, port + 1);
+    snprintf(m->path, sizeof m->path, "%smemcard%d.mcd", save_dir, port + 1);
     FILE *f = fopen(m->path, "rb");
     if (f && fread(m->data, 1, MC_SIZE, f) == MC_SIZE && m->data[0] == 'M' && m->data[1] == 'C') {
         fclose(f);
@@ -274,7 +279,7 @@ static uint32_t mc_next_dirent(uint32_t dst) {
     for (uint32_t b = dirent_iter_block; b < 16; b++) {
         uint8_t *d = mc_dir(m, b);
         if (d[0] != 0x51 || !mc_match(dirent_pattern, (char *)d + 10)) continue;
-        uint8_t *o = psx_ram + (dst & 0x1FFFFF);
+        uint8_t *o = guest_ptr(dst);
         memset(o, 0, 40);
         strncpy((char *)o, (char *)d + 10, 20);
         uint32_t attr = 0x50, size;
@@ -376,7 +381,7 @@ void bios_call(CPU *c, uint32_t table, uint32_t fn) {
             v0 = fd;
             break;
         }
-        DBG(1, "[card] open %s mode %x -> %d\n", name, a1, (int)v0);
+        LOG("[card] open %s mode %x -> %d\n", name, a1, (int)v0);
         break;
     }
     case 0xB033: {   // lseek(fd, off, whence)
@@ -403,8 +408,8 @@ void bios_call(CPU *c, uint32_t table, uint32_t fn) {
             uint32_t off = blk * 8192 + f->pos % 8192;
             uint32_t n = 8192 - f->pos % 8192;
             if (n > a2 - done) n = a2 - done;
-            if (fn == 0x34) memcpy(psx_ram + ((a1 + done) & 0x1FFFFF), m->data + off, n);
-            else { memcpy(m->data + off, psx_ram + ((a1 + done) & 0x1FFFFF), n); m->dirty = true; }
+            if (fn == 0x34) memcpy(guest_ptr(a1 + done), m->data + off, n);
+            else { memcpy(m->data + off, guest_ptr(a1 + done), n); m->dirty = true; }
             done += n;
             f->pos += n;
         }

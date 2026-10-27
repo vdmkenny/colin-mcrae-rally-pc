@@ -431,6 +431,8 @@ static void usage(void) {
 int main(int argc, char **argv) {
     char *pref = SDL_GetPrefPath("cmrally", "Colin McRae Rally");
     if (pref) { snprintf(save_dir, sizeof save_dir, "%s", pref); SDL_free(pref); }
+    for (int i = 1; i + 1 < argc; i++)
+        if (!strcmp(argv[i], "--save-dir")) snprintf(save_dir, sizeof save_dir, "%s/", argv[i + 1]);
     snprintf(settings_path, sizeof settings_path, "%scmrally.ini", save_dir);
     load_settings();
     bool testing = false;
@@ -461,6 +463,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--shot-dir") && i + 1 < argc) opts.shot_dir = argv[++i];
         else if (!strcmp(argv[i], "--script") && i + 1 < argc) opts.script = argv[++i];
         else if (!strcmp(argv[i], "--turbo")) opts.turbo = true;
+        else if (!strcmp(argv[i], "--save-dir") && i + 1 < argc) i++;
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(); return 0; }
         else if (argv[i][0] != '-') opts.cue = argv[i];
         else { usage(); return 1; }

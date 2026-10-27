@@ -860,9 +860,9 @@ bool render_init(SDL_Window *window) {
 
 bool render_set_vsync(bool on) {
     SDL_GPUPresentMode m = SDL_GPU_PRESENTMODE_VSYNC;
-    if (!on) {
-        if (SDL_WindowSupportsGPUPresentMode(dev, win, SDL_GPU_PRESENTMODE_IMMEDIATE)) m = SDL_GPU_PRESENTMODE_IMMEDIATE;
-        else if (SDL_WindowSupportsGPUPresentMode(dev, win, SDL_GPU_PRESENTMODE_MAILBOX)) m = SDL_GPU_PRESENTMODE_MAILBOX;
+    if (!on) {   // mailbox does not tear; immediate where that is all there is (Metal)
+        if (SDL_WindowSupportsGPUPresentMode(dev, win, SDL_GPU_PRESENTMODE_MAILBOX)) m = SDL_GPU_PRESENTMODE_MAILBOX;
+        else if (SDL_WindowSupportsGPUPresentMode(dev, win, SDL_GPU_PRESENTMODE_IMMEDIATE)) m = SDL_GPU_PRESENTMODE_IMMEDIATE;
     }
     if (!SDL_SetGPUSwapchainParameters(dev, win, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, m)) {
         LOG("GPU: %s\n", SDL_GetError());

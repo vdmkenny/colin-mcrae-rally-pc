@@ -33,7 +33,7 @@ static uint64_t pace_ns;   // target time of the end of the previous vblank
 static uint64_t vblank_ns = 1000000000ull * 1001 / 60000;
 static bool fast_forward;
 static bool vsync = true;
-static bool vsync_paces;     // the display runs at ~60 Hz, so buffer swaps pace emulation
+static bool vsync_paces;     // the display runs at a multiple of ~60 Hz, so buffer swaps pace emulation
 
 static struct {
     const char *cue;
@@ -236,6 +236,8 @@ static void update_rumble(void) {
     }
 }
 
+static void update_display_timing(void);
+
 static void handle_events(void) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -243,6 +245,10 @@ static void handle_events(void) {
         case SDL_EVENT_QUIT:
             LOG("quit\n");
             exit(0);
+        case SDL_EVENT_WINDOW_DISPLAY_CHANGED:      // moved to another monitor
+        case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED:
+            update_display_timing();
+            break;
         case SDL_EVENT_GAMEPAD_ADDED:
         case SDL_EVENT_GAMEPAD_REMOVED:
             assign_gamepads();
@@ -317,10 +323,35 @@ static void handle_events(void) {
 extern int frame_interval_override;
 
 // ----------------------------------------------------------------- frames
-static int presents_per_vblank = 1;   // >1 on high-refresh displays
-static int presents_override;
+// Images are presented at the refresh rate of the monitor the window is on. When that rate is a
+// multiple of ~60 Hz (60, 120, 240 ...) each emulated vblank lasts exactly that many refreshes
+// and, with vsync, the buffer swaps pace emulation. At other rates (75, 144, 165 ...) a timer
+// paces emulation at 59.94 Hz and one image is presented per refresh, interpolated for the
+// moment it reaches the screen.
+static uint64_t refresh_ns = 1000000000ull * 1001 / 60000;   // one refresh of the current monitor
+static int refreshes_per_vblank = 1;   // display-locked: refreshes per emulated vblank; 0: free-running
+static int presents_override;          // testing: images per vblank
+static uint64_t last_present;          // when the previous image went out (free-running)
+static int presents_counted;           // for the fps log
+
+static void update_display_timing(void) {
+    const SDL_DisplayMode *dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
+    float hz = dm && dm->refresh_rate > 0.0f ? dm->refresh_rate : 60.0f;
+    if (getenv("CMR_REFRESH_HZ")) hz = (float)atof(getenv("CMR_REFRESH_HZ"));   // testing other monitors
+    int k = (int)(hz / 59.94f + 0.5f);
+    float off = hz - 59.94f * (float)k;
+    refresh_ns = (uint64_t)(1e9 / hz);
+    refreshes_per_vblank = presents_override > 0 ? presents_override : k >= 1 && k <= 8 && off > -2.0f && off < 2.0f ? k : 0;
+    vsync_paces = vsync && refreshes_per_vblank && presents_override <= 0;
+    vblank_ns = vsync_paces ? (uint64_t)(1e9 * k / hz) : 1000000000ull * 1001 / 60000;
+    LOG("[host] display %.2f Hz: %s, %s\n", hz,
+        refreshes_per_vblank ? (refreshes_per_vblank > 1 ? "several images per vblank" : "one image per vblank")
+                             : "one image per refresh",
+        vsync_paces ? "vsync paces emulation" : "timer paces emulation");
+}
 
 static void present(float alpha) {
+    presents_counted++;
     DisplayInfo d;
     gpu_display_info(&d);
     if (!render_cfg.hw || d.rgb24) {
@@ -332,21 +363,40 @@ static void present(float alpha) {
     }
 }
 
-// Shows this vblank's images. A game frame lasting `interval` vblanks is shown as
-// interval * presents_per_vblank images, the in-between ones interpolated.
+// Shows this vblank's images. A game frame lasting `interval` vblanks is spread over all the
+// images shown during it, the in-between ones interpolated.
 static void present_vblank(void) {
     int interval = render_frame_interval(), k = render_vblanks_since_flip();
-    int n = presents_per_vblank;
-    const uint64_t frame_ns = vblank_ns;
-    uint64_t deadline = pace_ns + frame_ns;   // when this vblank's time is up
-    for (int p = 0; p < n; p++) {
-        // Extra images are optional: skip them rather than slow the game down.
-        if (p > 0 && !opts.turbo && SDL_GetTicksNS() + frame_ns / (uint64_t)n / 2 > deadline) break;
-        float alpha = 1.0f;
-        if (render_cfg.interpolate && interval >= 2 && interval <= 4)
-            alpha = (float)(k * n + p + 1) / (float)(interval * n);
-        present(alpha > 1.0f ? 1.0f : alpha);
-        if (p + 1 < n && !vsync_paces && !opts.turbo) SDL_DelayPrecise(1000000000ull * 1001 / 60000 / (uint64_t)n);
+    bool interp = render_cfg.interpolate && interval >= 2 && interval <= 4;
+    uint64_t start = pace_ns, deadline = pace_ns + vblank_ns;   // this vblank's share of real time
+    int n = opts.turbo ? (presents_override > 0 ? presents_override : 1) : refreshes_per_vblank;
+    if (n) {
+        for (int p = 0; p < n; p++) {
+            // Extra images are optional: skip them rather than slow the game down.
+            if (p > 0 && !opts.turbo && SDL_GetTicksNS() + vblank_ns / (uint64_t)n / 2 > deadline) break;
+            float alpha = interp ? (float)(k * n + p + 1) / (float)(interval * n) : 1.0f;
+            present(alpha > 1.0f ? 1.0f : alpha);
+            if (p + 1 < n && !vsync_paces && !opts.turbo) SDL_DelayPrecise(vblank_ns / (uint64_t)n);
+        }
+    } else if (!interp) {
+        present(1.0f);   // nothing moves between vblanks
+    } else {
+        // One image per refresh until the next vblank is due. With vsync the swap waits for the
+        // refresh; the timer keeps the rate when it does not (vsync off, occluded window).
+        for (;;) {
+            uint64_t now = SDL_GetTicksNS();
+            if (now > last_present + 2 * refresh_ns) last_present = 0;
+            if (last_present) {
+                uint64_t due = last_present + (vsync ? refresh_ns * 3 / 4 : refresh_ns);
+                if (due >= deadline) break;   // that image belongs to the next vblank
+                if (due > now) { SDL_DelayPrecise(due - now); now = due; }
+            }
+            // the image is on screen about one refresh later with vsync
+            double phase = (double)(now + (vsync ? refresh_ns : 0) - start) / (double)vblank_ns;
+            float alpha = (float)(((double)k + phase) / (double)interval);
+            present(alpha > 1.0f ? 1.0f : alpha);
+            last_present = vsync ? SDL_GetTicksNS() : now;
+        }
     }
     render_vblank();
 }
@@ -426,9 +476,12 @@ void host_frame(void) {
     if (log_level >= 1 && frame_count % 300 == 0) {
         uint64_t now = SDL_GetTicksNS();
         extern int interp_stat_matched, interp_stat_total, interp_stat_found;
-        if (fps_t0) LOG("[host] frame %d, %.1f fps, interpolated vertices %d/%d (keys found %d)\n", frame_count,
-                        300e9 / (double)(now - fps_t0), interp_stat_matched, interp_stat_total, interp_stat_found);
+        if (fps_t0)
+            LOG("[host] frame %d, %.1f fps emulated, %.1f presented, interpolated vertices %d/%d (keys found %d)\n",
+                frame_count, 300e9 / (double)(now - fps_t0), presents_counted * 1e9 / (double)(now - fps_t0),
+                interp_stat_matched, interp_stat_total, interp_stat_found);
         interp_stat_matched = interp_stat_total = interp_stat_found = 0;
+        presents_counted = 0;
         fps_t0 = now;
     }
     if (!opts.turbo) pace();
@@ -662,15 +715,7 @@ int main(int argc, char **argv) {
     }
     if (opts.turbo) vsync = false;
     if (!render_set_vsync(vsync && !getenv("CMR_TEST_NONBLOCKING_SWAP")) && vsync) vsync = false;
-    const SDL_DisplayMode *dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
-    float hz = dm ? dm->refresh_rate : 60.0f;
-    if (vsync && hz >= 89.0f) presents_per_vblank = (int)(hz / 59.94f + 0.5f) > 4 ? 4 : (int)(hz / 59.94f + 0.5f);
-    if (presents_override > 0) presents_per_vblank = presents_override > 4 ? 4 : presents_override;
-    float target = 59.94f * presents_per_vblank;
-    vsync_paces = vsync && hz > target - 2.0f && hz < target + 2.0f;
-    if (vsync_paces) vblank_ns = (uint64_t)(1e9 * presents_per_vblank / hz);
-    LOG("[host] display %.2f Hz, %d image%s per vblank, %s\n", hz, presents_per_vblank,
-        presents_per_vblank > 1 ? "s" : "", vsync_paces ? "vsync paces emulation" : "timer paces emulation");
+    update_display_timing();
     SDL_AudioSpec spec = {SDL_AUDIO_S16, 2, 44100};
     if (!opts.mute) {
         audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);

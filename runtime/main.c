@@ -43,6 +43,7 @@ static struct {
     int shot_every;          // testing: save a screenshot every N frames
     const char *shot_dir;
     const char *script;      // testing: scripted input "frame:buttons,..."
+    const char *script2;     // testing: scripted input for a pad on port 2
     bool turbo;              // testing: no frame pacing
     bool mute;               // no audio output (WAV capture still works)
     bool hidden;             // testing: no visible window
@@ -50,11 +51,11 @@ static struct {
 
 static int frame_count;
 
-static uint16_t script_buttons(int frame, PadState *pad) {
+static uint16_t script_buttons(const char *script, int frame, PadState *pad) {
     // Format: "<start>-<end>:<hex buttons>[:<lx hex>]...;" e.g. "300-310:8;600-605:4000:20"
-    if (!opts.script) return 0;
+    if (!script) return 0;
     uint16_t b = 0;
-    const char *p = opts.script;
+    const char *p = script;
     while (*p) {
         int a = 0, e = 0;
         unsigned m = 0, lx = 0x80, ni = 0;
@@ -291,7 +292,7 @@ static void handle_events(void) {
         p->connected = port == 0 || gamepads[port];
         if (port == 0) {
             poll_keyboard(p);
-            p->buttons |= script_buttons(frame_count, p);
+            p->buttons |= script_buttons(opts.script, frame_count, p);
             if (port_negcon[0]) {
                 // keyboard on a NeGcon: arrows twist fully, X/Z are I/II
                 if (p->buttons & PAD_LEFT) p->lx = 0x00;
@@ -299,6 +300,10 @@ static void handle_events(void) {
                 if (p->buttons & PAD_CROSS) p->negcon_i = 255;
                 if (p->buttons & PAD_SQUARE) p->negcon_ii = 255;
             }
+        }
+        if (port == 1 && opts.script2) {
+            p->connected = true;
+            p->buttons |= script_buttons(opts.script2, frame_count, p);
         }
         poll_gamepad(p, gamepads[port], port_negcon[port], port_type[port] == CTRL_DUALSHOCK);
         if (port_type[port] == CTRL_DUALSHOCK && p->lx == 0x80) {
@@ -599,6 +604,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--shot-every") && i + 1 < argc) opts.shot_every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--shot-dir") && i + 1 < argc) opts.shot_dir = argv[++i];
         else if (!strcmp(argv[i], "--script") && i + 1 < argc) opts.script = argv[++i];
+        else if (!strcmp(argv[i], "--script2") && i + 1 < argc) opts.script2 = argv[++i];
         else if (!strcmp(argv[i], "--turbo")) opts.turbo = true;
         else if (!strcmp(argv[i], "--mute")) opts.mute = true;
         else if (!strcmp(argv[i], "--hidden")) opts.hidden = true;

@@ -80,7 +80,7 @@ prefer digital mode. In analog mode the d-pad also steers (full lock).
 | Start / Select | Start / Back | Enter / Right Shift |
 
 Without a gamepad the keyboard drives a digital pad. A second gamepad is connected to port 2
-for the game's two-player mode (not tested yet). `--controller negcon` presents Namco's
+for the game's two-player split-screen mode. `--controller negcon` presents Namco's
 NeGcon instead, which the game also supports: stick twist steering plus analog throttle (right
 trigger) and brake (left trigger), but no vibration. The game has its own controller options
 in the pause menu.
@@ -116,6 +116,12 @@ Settings and memory cards live in the user preferences folder
   into C. Functions are discovered from a Ghidra analysis (`tools/functions/`), jal targets
   and code pointers; branches and delay slots map to gotos, `jal` to C calls, jump tables
   to `switch`. `tools/hooks.txt` attaches native code to specific game functions.
+- The game rewrites parts of its own rendering code while it runs: the ambient light colour
+  and the screen clipping bounds are patched into instruction immediates, and mirrored views
+  flip a culling branch. The recompiler finds these patch sites (stores to constant code
+  addresses, also through a pointer a caller passes in) and makes the generated code read
+  those fields from RAM. `tools/smc_check.py` compares a RAM dump against the executable to
+  confirm no rewritten instruction is missed.
 - `runtime/` replaces the console: HLE BIOS (interrupt chains, events, memory card
   filesystem, `DoExecute` switching between executables), GTE, GPU (software rasterizer
   for the authoritative 1x VRAM), SPU, CD-ROM controller (XA-ADPCM, CD-DA), MDEC, DMA,
@@ -129,22 +135,17 @@ Settings and memory cards live in the user preferences folder
 ## Status
 
 Boots through the FMVs and menus into championship stages, pausing and quitting back to the
-frontend; Rally School; the attract-mode demo; memory card save and load. Verified in real
-time at 60 emulated fps with the high-resolution renderer and interpolation on an Apple M3
-Pro (120 Hz display). The game logic runs at its original 30 Hz; races are shown at the
-display refresh rate through interpolation. In widescreen the game occasionally culls
-scenery just outside its original 4:3 view. A full championship has not been played
-through, so later stages and end-of-rally screens are less tested.
+frontend; Rally School; the attract-mode demo; two-player split screen; memory card save and
+load. Verified in real time at 60 emulated fps with the high-resolution renderer and
+interpolation on an Apple Silicon Mac (120 Hz display). The game logic runs at its original 30 Hz;
+races are shown at the display refresh rate through interpolation. A full championship has
+not been played through, so later stages and end-of-rally screens are less tested.
 
 Development aids: `--log N`, `--turbo`, `--hidden`, `--exit-after N`, `--shot-every N --shot-dir D`,
-`--script "from-to:buttons[:twist[:throttle]];..."`, `--wav file.wav`, `--save-dir D`, the
+`--script "from-to:buttons[:twist[:throttle]];..."` (`--script2` for port 2), `--wav file.wav`,
+`--save-dir D`, the
 recent-function trace and shadow call stack printed on fatal errors, and environment
 variables: `CMR_DUMP_PRIMS=<frame>` (raw GPU commands), `CMR_DUMP_GTE=<frame>` (GTE command
 use and lighting registers), `CMR_TRACE_LIGHT=1` (light matrix/ambient writes with callers),
 `CMR_WATCH=addr,...` (log RAM word changes per vblank), `CMR_DUMP_RAM=file` (RAM at exit),
 `CMR_ANALOG_AT=<frame>` (press ANALOG on port 1).
-
-Open question: night stages (e.g. the attract-mode demo on Sweden stage 2, which the game's
-own tables mark as a night stage) render with black near-track geometry. The game selects a
-"dark" lighting setup there on purpose; whether the result matches real hardware has not
-been verified yet.

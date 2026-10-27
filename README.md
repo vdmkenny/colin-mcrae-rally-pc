@@ -172,6 +172,10 @@ drive = 4WD                   # 4WD, FWD or RWD, shown in the car menu
 mass = 750                    # kg (optional; every disc car is 1120)
 ```
 
+`tools/gt2car.py` also writes where the lamps are, for the glows and the brake lights the game
+draws over them (`head_lamp`, `fog_lamp`, `tail_lamp`), and how far the base car's physics
+lowers smaller wheels (`wheel_drop`, for the car menu's model, which has no physics).
+
 Files the folder lacks come from the base car, whose class the mode's rules (kit cars, bonus
 cars) also apply to. The car menu shows the car's `MEDIUM` model. The frontend saves the base
 car, so a saved championship continues with it. A car keeps its base's collision box, driver's
@@ -187,9 +191,9 @@ sharing:
   Simulation disc:
   `python3 tools/gt2car.py GRANTURISMO2.BIN s2v4n build/cars/vivio --bhp 63 --mass 750
   --wheelbase 2310 --short-name "VIVIO RX-RA" --paint EBA92E --rim 13`
-- `tools/carsound.py` makes an engine sound from a disc car's, optionally revving higher and
-  supercharged: `python3 tools/carsound.py "Colin McRae Rally.cue" VWGOLF
-  build/cars/vivio/SOUNDS.BFX --pitch 1.19 --whine 0.2`
+- `tools/carsound.py` makes an engine sound from a disc car's, optionally revving higher,
+  supercharged and without the turbo's dump valve: `python3 tools/carsound.py
+  "Colin McRae Rally.cue" VWGOLF build/cars/vivio/SOUNDS.BFX --pitch 1.19 --whine 0.2 --blowoff 0`
 
 `tools/cmrexport.py` renders a car folder (OBJ export, views, its VRAM area) to check a car
 before driving it.

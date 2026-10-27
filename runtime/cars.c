@@ -62,6 +62,22 @@ static bool read_ini(ExtraCar *car, const char *path) {
         else if (!strcmp(k, "bhp")) car->bhp = atoi(v);
         else if (!strcmp(k, "wheelbase")) car->wheelbase = atoi(v);
         else if (!strcmp(k, "mass")) car->mass = atoi(v);
+        else if (!strcmp(k, "wheel_drop")) car->wheel_drop = (float)atof(v);
+        else if (!strcmp(k, "head_lamp") || !strcmp(k, "fog_lamp")) {
+            float *l = car->lamps[k[0] == 'h' ? 0 : 1];
+            sscanf(v, "%f %f %f", &l[0], &l[1], &l[2]);
+        }
+        else if (!strcmp(k, "tail_lamp")) {
+            int n = 0;
+            for (char *q = v; n < 18; n++) {
+                char *e;
+                float f = strtof(q, &e);
+                if (e == q) break;
+                car->tail[n / 3][n % 3] = f;
+                q = e;
+            }
+            car->tail_points = n % 3 || n / 3 == 2 || n / 3 == 3 ? 0 : n / 3;
+        }
         else if (!strcmp(k, "drive")) {
             upper(v);
             car->drive = !strcmp(v, "FWD") ? 1 : !strcmp(v, "RWD") ? 2 : 0;
@@ -123,6 +139,41 @@ static void psx_string(uint32_t a, char *out, size_t n) {
     out[i] = 0;
 }
 
+static void put_point(uint32_t a, const float *p, float z) {
+    WR32(a, (uint32_t)(int32_t)(p[0] * 65536)); WR32(a + 4, (uint32_t)(int32_t)(p[1] * 65536));
+    WR32(a + 8, (uint32_t)(int32_t)(z * 65536));
+}
+
+// The game keeps per car the name the stage screens show and where its lamps glow; for a race
+// with an extra car its base car's entries take the extra car's.
+static void patch_game_name(const ExtraCar *car) {
+    uint32_t name = RD32(GAME_CAR_NAMES + (uint32_t)car->base * 4);
+    size_t room = 0;
+    while (room < 64 && RD8(name + (uint32_t)room)) room++;
+    for (size_t i = 0; i < room; i++) WR8(name + (uint32_t)i, i < strlen(car->name) ? (uint8_t)car->name[i] : 0);
+}
+
+static void patch_game_lamps(const ExtraCar *car) {
+    uint32_t b = (uint32_t)car->base;
+    const float *head = car->lamps[0], *fog = car->lamps[1];
+    if (head[0]) {
+        uint32_t a = FRONT_LAMPS + b * 0x60;
+        put_point(a, head, -head[2]); put_point(a + 12, head, head[2]);
+        put_point(a + 24, fog, -fog[2]); put_point(a + 36, fog, fog[2]);
+        WR8(FRONT_LAMPS_DAY + b, 2);
+        WR8(FRONT_LAMPS_NIGHT + b, 2);
+    }
+    if (car->tail_points) {   // an outline is lit over the lamp; its middle is where it glows
+        const uint32_t lists[3][2] = {{REAR_LAMPS_A, REAR_LAMPS_A_N}, {REAR_LAMPS_B, REAR_LAMPS_B_N},
+                                      {REAR_LAMPS_C, REAR_LAMPS_C_N}};
+        for (int i = 0; i < 3; i++) {
+            for (int k = 0; k < car->tail_points; k++)
+                put_point(lists[i][0] + b * 0x48 + (uint32_t)k * 12, car->tail[k], car->tail[k][2]);
+            WR8(lists[i][1] + b, (uint8_t)car->tail_points);
+        }
+    }
+}
+
 // game: works out a player's car folder (a1) and DAY or NIGHT (a2), returns the car.
 int hook_car_path(CPU *c, RecompFn orig) {
     uint32_t slot = c->r[4], dir = c->r[5];
@@ -134,6 +185,17 @@ int hook_car_path(CPU *c, RecompFn orig) {
     char s[32];
     snprintf(s, sizeof s, "CARS\\EXTRA%d\\", car_extra[slot]);
     for (size_t i = 0; i <= strlen(s); i++) WR8(dir + (uint32_t)i, (uint8_t)s[i]);
+    patch_game_name(car);
+    return 1;
+}
+
+// game: works out where a car's lamps glow from the per-car lamp tables (a0: its body).
+int hook_lamps(CPU *c, RecompFn orig) {
+    uint32_t body = c->r[4];
+    int slot = (int)RD8(body + BODY_SLOT);
+    if (slot <= 1 && car_extra[slot] >= 0 && (int)RD8(body + BODY_CAR) == extra_cars[car_extra[slot]].base)
+        patch_game_lamps(&extra_cars[car_extra[slot]]);
+    orig(c);
     return 1;
 }
 
@@ -216,10 +278,10 @@ static void put_text(uint32_t a, const char *s) {
     for (size_t i = 0; i <= strlen(s); i++) WR8(a + (uint32_t)i, (uint8_t)s[i]);
 }
 
-// Writes the names and specs of a player's extra car on show into a car's table entries.
-static void fill(int slot, int player) {
-    const ExtraCar *car = &extra_cars[shown[player]];
-    uint32_t text = FE_TEXT + (uint32_t)player * 0x40;
+// Writes the names and specs of extra car k into car `slot`'s table entries (text: string slot).
+static void fill(int slot, int k, int text_slot) {
+    const ExtraCar *car = &extra_cars[k];
+    uint32_t text = FE_TEXT + (uint32_t)text_slot * 0x40;
     put_text(text, car->name);
     put_text(text + 0x20, car->short_name);
     WR32(CAR_NAMES + (uint32_t)slot * 4, text);
@@ -262,8 +324,43 @@ static void upload_showroom(int k) {
     }
 }
 
+// After the car menu the frontend's screens show the stored car, the base: while player 1 has
+// an extra car, the base car's names, specs and showroom model are the extra car's.
+static int patched = -1;            // base car whose entries are an extra car's
+static uint32_t patch_saved[6];
+
+static void unpatch_base(void) {
+    if (patched < 0) return;
+    uint32_t b = (uint32_t)patched;
+    WR32(CAR_NAMES + b * 4, patch_saved[0]); WR32(CAR_SHORT_NAMES + b * 4, patch_saved[1]);
+    WR32(CAR_SPECS + b * 12, patch_saved[2]); WR32(CAR_SPECS + b * 12 + 4, patch_saved[3]);
+    WR32(CAR_SPECS + b * 12 + 8, patch_saved[4]);
+    for (int i = 0; i < num_extra_cars; i++)
+        if (extra_cars[i].showroom && RD32(CAR_MODELS + b * 8) == extra_cars[i].showroom)
+            WR32(CAR_MODELS + b * 8, patch_saved[5]);
+    patched = -1;
+}
+
+static void patch_base(void) {
+    unpatch_base();
+    int k = car_extra[0];
+    if (k < 0) return;
+    uint32_t b = (uint32_t)extra_cars[k].base;
+    if ((int)(RD32(RD32(GAME_INFO_PTR) + GI_CAR_P1) >> 16 & 15) != (int)b) return;
+    patched = (int)b;
+    patch_saved[0] = RD32(CAR_NAMES + b * 4); patch_saved[1] = RD32(CAR_SHORT_NAMES + b * 4);
+    patch_saved[2] = RD32(CAR_SPECS + b * 12); patch_saved[3] = RD32(CAR_SPECS + b * 12 + 4);
+    patch_saved[4] = RD32(CAR_SPECS + b * 12 + 8); patch_saved[5] = RD32(CAR_MODELS + b * 8);
+    fill((int)b, k, 2);
+    if (extra_cars[k].showroom) {
+        upload_showroom(k);
+        WR32(CAR_MODELS + b * 8, extra_cars[k].showroom);
+    }
+}
+
 // frontend: sets up the car menus (a0: the car screen's menu).
 int hook_car_menu_init(CPU *c, RecompFn orig) {
+    unpatch_base();
     p1_menu = c->r[4];
     orig(c);
     extra_entry = -1;
@@ -339,6 +436,13 @@ int hook_showrooms(CPU *c, RecompFn orig) {
         memcpy(&size, bfx, 4);
         for (uint32_t k = 0; k < size; k++) WR8(data + k, bfx[4 + k]);
         uint32_t obj = call(c, FN_NEW_OBJECT, RD32(SHOWROOM_SCENE), 0, 0);
+        // the showroom has no physics to lower the wheels to the ground (see wheel_drop)
+        uint32_t nodes = data + 16 + 4 * RD16(data);
+        for (uint32_t k = 0; k < RD16(data + 2); k++) {
+            uint32_t nd = nodes + k * 0xbc, id = RD32(nd + 0x14) & 0xfff;
+            for (uint32_t t = 0x40; id >= 1 && id <= 4 && t <= 0x70; t += 0x30)   // base, local y
+                WR32(nd + t, RD32(nd + t) - (uint32_t)(int32_t)(car->wheel_drop * 65536));
+        }
         call(c, FN_LOAD_MODEL, data, obj, 0);
         call(c, FN_PLACE_OBJECT, obj, SHOWROOM_POS, SHOWROOM_ROT);
         uint32_t arches = call(c, FN_FIND_NODE, obj, 6, 0);   // drawn behind, as the game does
@@ -348,6 +452,8 @@ int hook_showrooms(CPU *c, RecompFn orig) {
         car->showroom = obj;
         data += (size + 0xfff) & ~0xfffu;
     }
+    patched = -1;   // a new frontend: its tables are the disc's
+    patch_base();
     return 1;
 }
 
@@ -368,7 +474,7 @@ static int car_row(CPU *c, RecompFn orig, int player, uint32_t item) {
         RD32(CAR_NAMES + b * 4), RD32(CAR_SHORT_NAMES + b * 4), RD32(CAR_SPECS + b * 12),
         RD32(CAR_SPECS + b * 12 + 4), RD32(CAR_SPECS + b * 12 + 8), RD32(CAR_MODELS + b * 8),
     };
-    fill((int)b, player);
+    fill((int)b, shown[player], player);
     if (extra_cars[shown[player]].showroom) {   // else the base car's model shows
         upload_showroom(shown[player]);
         WR32(CAR_MODELS + b * 8, extra_cars[shown[player]].showroom);
@@ -401,5 +507,7 @@ int hook_car_commit(CPU *c, RecompFn orig) {
         car_extra[p] = shown[p];
         WR32(a, (v & ~0xf0000u) | (uint32_t)extra_cars[shown[p]].base << 16);
     }
+    hide_showrooms();
+    patch_base();
     return 1;
 }

@@ -29,6 +29,16 @@
 #define BODY_MASS       0x48          // car physics body: mass (kg, 16.16), then its reciprocal
 #define BODY_SLOT       0x624
 #define BODY_CAR        0x625
+#define GAME_CAR_NAMES  0x800bd05cu   // string pointer per car
+#define FRONT_LAMPS     0x800bf5a4u   // per car 8 points (16.16 m, 12 bytes): glows, breakable
+#define FRONT_LAMPS_DAY 0x800bfa24u   // byte per car: how many are lit always
+#define FRONT_LAMPS_NIGHT 0x800bfa30u // byte per car: how many more at night
+#define REAR_LAMPS_A    0x800beb60u   // rear lamps: per car up to 6 points (0x48 bytes) and a
+#define REAR_LAMPS_A_N  0x800beec0u   //   count; 4-6 points outline the left lamp, which is drawn
+#define REAR_LAMPS_B    0x800beeccu   //   lit over it (the right mirrored), and glows at their middle
+#define REAR_LAMPS_B_N  0x800bf22cu
+#define REAR_LAMPS_C    0x800bf238u
+#define REAR_LAMPS_C_N  0x800bf598u
 #define GAME_RACE_INFO  0x800c6db8u   // -> the frontend's choices: 0x60 bytes per player from +0x18
 #define RI_CAR          0x76          // low 4 bits: the player's car
 

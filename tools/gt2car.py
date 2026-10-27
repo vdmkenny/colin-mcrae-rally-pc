@@ -132,8 +132,9 @@ def parse_model(d):
 
     GT2 has y up, the front towards -z and the left towards -x. Returns {wheels: [(x, y, z,
     radius, width)] front left, front right, rear left, rear right, lods: [{vertices: [(x, y, z)],
-    faces: [{verts, normals, uvs, palette, colour}]}]}; normals are per face corner, faces
-    without uvs are flat colour (0xBBGGRR).
+    faces: [{verts, normals, uvs, palette, colour, order}]}]}; normals are per face corner,
+    faces without uvs are flat colour (0xBBGGRR), order is GT2's drawing order (16 normally,
+    lower in front, higher behind).
     """
     menu = struct.unpack_from("<4H", d, 0x18 if not struct.unpack_from("<H", d, 8)[0] else 8)
     wheels = []
@@ -160,7 +161,7 @@ def parse_model(d):
                 first, _, rest, ftype = struct.unpack_from("<HHII", d, q + 4)
                 ni = [(first >> 5) & 0x1ff, (rest >> 1) & 0x1ff, (rest >> 10) & 0x1ff, (rest >> 19) & 0x1ff]
                 f = {"verts": vi, "normals": [normals[j] if j < nn else None for j in ni[:len(vi)]],
-                     "colour": ftype & 0xffffff, "uvs": None, "palette": None}
+                     "colour": ftype & 0xffffff, "uvs": None, "palette": None, "order": first & 31}
                 if uv:
                     pal = struct.unpack_from("<H", d, q + 18)[0]
                     f["palette"] = (pal & 3) + ((pal >> 6) & 3) * 4
@@ -239,12 +240,16 @@ def cross(a, b):
     return a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]
 
 
+LAMP, ORDERED = 1, 2   # decal kinds: over a face on the same corners, or ordered in front
+
+
 def triangles(lod, dy, transparent):
     """GT2 faces as game-axis triangles: [(corners [(position, normal)], uvs, palette, colour,
-    decal)]. GT2 winds every face outward the same way, which the change of axes mirrors.
-    A decal (a lamp) is drawn over another face on the same corners: the one with transparent
-    texels, else the first. The face under a decal takes the decal's normals (GT2 gives it a
-    placeholder), and corners whose normals point inward get the face's own."""
+    decal kind)]. GT2 winds every face outward the same way, which the change of axes mirrors.
+    A decal (a lamp) is drawn over what is behind it: a face GT2 orders in front, or of two
+    faces on the same corners the one with transparent texels, else the first. The face under
+    a decal takes the decal's normals (GT2 gives it a placeholder), and corners whose normals
+    point inward get the face's own."""
     out = []
     verts = [to_game(v, dy) for v in lod["vertices"]]
     twins = collections.defaultdict(list)
@@ -269,7 +274,8 @@ def triangles(lod, dy, transparent):
             if sum(sum(a * b for a, b in zip(face_n, n)) for n in ns) < 0:
                 ns = [face_n] * 3
             uvs = [f["uvs"][i] for i in t] if f["uvs"] else None
-            out.append((list(zip(pos, ns)), uvs, f["palette"], f["colour"], id(f) in decals))
+            out.append((list(zip(pos, ns)), uvs, f["palette"], f["colour"],
+                        LAMP if id(f) in decals else ORDERED if f["order"] < 16 else 0))
     return out
 
 
@@ -448,7 +454,8 @@ def tex_index(scene, tp, cl):
 
 def exterior(gt2, paint, base, texels, palette_tex, panels, wheel_scale, lod, rim):
     """Chunk 0: root, wheels (the base car's, resized, rims to `rim` inches), body group, body
-    panels, and the decals in a last panel drawn one step nearer, over what they cover."""
+    panels, and the decals in a last panel drawn one step nearer, over what they cover; the
+    tail lamps are the tail light panels, which the game lights when braking."""
     bw = next(n for n in base.nodes if n.id & 0xfff == 1)
     bmesh = base.meshes[bw.mesh]
     bverts = bmesh.lods[0].verts.verts
@@ -470,15 +477,29 @@ def exterior(gt2, paint, base, texels, palette_tex, panels, wheel_scale, lod, ri
     wheel.radius, wheel.zbias = cmrcar.mesh_radius(wheel), bmesh.zbias
     s.meshes.append(wheel)
     s.nodes.append(cmrcar.Node(id=0))
-    for wx, wy, wz, _, ww in gt2["wheels"]:   # GT2's x is the wheel's outer face
-        centre = (wx - math.copysign(ww / 2, wx), wy, wz)
-        s.nodes.append(cmrcar.Node(id=len(s.nodes), mesh=0, parent=0, base=place(*to_game(centre, dy))))
-    s.nodes.append(cmrcar.Node(id=5, parent=0))
     tris = triangles(gt2["lods"][lod], dy, transparent_texels(paint))
+    for wx, wy, wz, wr, ww in gt2["wheels"]:
+        # GT2 draws wheels over the body; here the hub must clear the bodywork by its arch
+        cx, cy, _ = to_game((wx, wy, wz), dy)
+        side = max([abs(p[2]) for t in tris for p, _ in t[0] if abs(p[0] - cx) < wr * 1.3 and
+                    p[1] < cy + wr * 1.3 and (p[2] > 0) == (wx < 0)] or [abs(wx)])
+        cz = math.copysign(side + 0.015 - ww / 2, -wx)
+        # The base car's physics hangs a wheel as far below its model position as it is
+        # smaller than the base car's, so its tyre stays on the road: start from the base's.
+        s.nodes.append(cmrcar.Node(id=len(s.nodes), mesh=0, parent=0, base=place(cx, cy + b_r - r, cz)))
+    s.nodes.append(cmrcar.Node(id=5, parent=0))
     parts = classify([t for t in tris if not t[4]], panels)
     decals = [t for t in tris if t[4]]
+    front = set(range(len(parts), len(parts) + 1))   # panels drawn one step nearer
+    if panels == 11:
+        # the game lights the tail light panels when braking: they get the tail lamps
+        parts[5] += parts[8] + parts[9]
+        parts[8] = [t for t in decals if t[4] == LAMP and t[0][0][0][0] < 0 and t[0][0][0][2] > 0]
+        parts[9] = [t for t in decals if t[4] == LAMP and t[0][0][0][0] < 0 and t[0][0][0][2] < 0]
+        decals = [t for t in decals if not any(t is u for u in parts[8] + parts[9])]
+        front |= {8, 9}
     for i, part in enumerate(parts + ([decals] if decals else [])):
-        s.meshes.append(panel_mesh(part, lambda p: tex_index(s, *palette_tex(p)), 0 if i == len(parts) else 1))
+        s.meshes.append(panel_mesh(part, lambda p: tex_index(s, *palette_tex(p)), 0 if i in front else 1))
         s.nodes.append(cmrcar.Node(id=6 + i, mesh=len(s.meshes) - 1, parent=5))
     pts = [p for t in tris for p, _ in t[0]]
     s.meshes[1].extents = tuple(round((max(p[i] for p in pts) - min(p[i] for p in pts)) / 2 * FIX) for i in range(3))
@@ -556,7 +577,7 @@ def car_files(gt2, paint, base, kind, rim):
     image = cmrcar.TIM.make_4bpp(896, 0, paint["pixels"], 256, 832, 0, pal[0])
     out = dummies(next(rows)) + [image]
     out += [cmrcar.TIM.make_4bpp(847, 254, [0] * 4, 4, 832, 2 * k, pal[k]) for k in range(1, 16)]
-    return cmrcar.ModelFile(scenes), cmrcar.TextureFile(out + texels.tims)
+    return cmrcar.ModelFile(scenes), cmrcar.TextureFile(out + texels.tims), dy
 
 
 def medium_files(gt2, paint, base, rim):
@@ -585,10 +606,53 @@ def medium_files(gt2, paint, base, rim):
     return cmrcar.ModelFile(scenes), cmrcar.TIM(2, None, (832, 0, 64, 255, data))
 
 
+def tail_light(tris):
+    """The game lights a brake light by drawing its outline (4 to 6 points) over it: the left tail
+    lamp's largest rear-facing triangle pair, pulled in a little and out 1 cm, wound outward."""
+    def area(t):
+        (a, _), (b, _), (c, _) = t[0]
+        return math.sqrt(sum(x * x for x in cross([q - p for p, q in zip(a, b)], [q - p for p, q in zip(a, c)]))) / 2
+    rear = [t for t in tris if t[4] == LAMP and t[0][0][0][0] < 0 and t[0][0][0][2] > 0
+            and sum(n[0] for _, n in t[0]) < -1.5]
+    if not rear:
+        return None
+    pts = []
+    for t in sorted(rear, key=area, reverse=True)[:2]:
+        for p, _ in t[0]:
+            if all(sum((a - b) ** 2 for a, b in zip(p, q)) > 1e-6 for q in pts):
+                pts.append(p)
+    pts = pts[:4]
+    if len(pts) < 4:
+        return None
+    mid = [sum(p[i] for p in pts) / 4 for i in range(3)]
+    # order the corners around the middle (in the y-z plane, seen from behind)
+    pts.sort(key=lambda p: math.atan2(p[1] - mid[1], -(p[2] - mid[2])))
+    n = norm(cross([b - a for a, b in zip(pts[0], pts[1])], [b - a for a, b in zip(pts[0], pts[2])]))
+    if n[0] > 0:
+        pts.reverse()
+        n = tuple(-c for c in n)
+    return [round(m + (c - m) * 0.85 + d * 0.01, 3) for p in pts for c, m, d in zip(p, mid, n)]
+
+
+def lamp_centres(gt2, paint, dy):
+    """Where the game puts its lamp glows, from the lamps: the left headlight and fog lamp centres
+    and the tail light's outline (game axes, metres); the fog lamp falls back on the headlight."""
+    tris = triangles(gt2["lods"][0], dy, transparent_texels(paint))
+    def centre(ts):
+        pts = [p for t in ts for p, _ in t[0]]
+        return pts and tuple(round(sum(p[i] for p in pts) / len(pts), 3) for i in range(3))
+    left = [t for t in tris if t[4] and centre([t])[2] > 0]
+    head = centre([t for t in left if t[4] == LAMP and centre([t])[0] > 0])
+    pals = {t[2] for t in left if t[4] == LAMP and centre([t])[0] > 0}
+    fog = centre([t for t in left if t[4] == ORDERED and t[2] in pals and centre([t])[0] > 0])
+    tail = tail_light(tris) or centre([t for t in left if t[4] == LAMP and centre([t])[0] < 0])
+    return {"head_lamp": head, "fog_lamp": fog or head, "tail_lamp": tail}
+
+
 def write_car(out, base, day, night, paint, night_paint, rim):
     files = {}
     for kind, model, p in (("DAY", day, paint), ("NIGHT", night, night_paint)):
-        files[kind + ".BFX"], files[kind + "TIM.BFX"] = car_files(model, p, base, kind, rim)
+        files[kind + ".BFX"], files[kind + "TIM.BFX"], dy = car_files(model, p, base, kind, rim)
     files["MEDIUM.BFX"], files["MEDIUM.TIM"] = medium_files(day, paint, base, rim)
     for kind in ("DAY", "NIGHT", "MEDIUM"):
         tex = files["MEDIUM.TIM" if kind == "MEDIUM" else kind + "TIM.BFX"]
@@ -598,6 +662,7 @@ def write_car(out, base, day, night, paint, night_paint, rim):
     for name, obj in files.items():
         with open(os.path.join(out, name), "wb") as f:
             f.write(obj.serialize())
+    return lamp_centres(day, paint, dy)
 
 
 def base_files(cue, car):
@@ -665,12 +730,17 @@ def main():
     w = day["wheels"]
     wheelbase = a.wheelbase or round(abs(w[0][2] - w[2][2]) * 1000)
     os.makedirs(a.out, exist_ok=True)
-    write_car(a.out, base, day, night, paint, night_paint, a.rim)
+    lamps = write_car(a.out, base, day, night, paint, night_paint, a.rim)
+    bw = next(n for n in base["DAY.BFX"].scenes[0].nodes if n.id & 0xfff == 1)
+    bverts = base["DAY.BFX"].scenes[0].meshes[bw.mesh].lods[0].verts.verts
+    drop = max(math.hypot(v.x, v.y) for v in bverts) / M / math.sqrt(2) - day["wheels"][0][3]
     with open(os.path.join(a.out, "car.ini"), "w") as f:
         f.write(f"# converted from Gran Turismo 2 ({a.car}) by tools/gt2car.py\n"
                 f"name = {name}\nshort_name = {short}\nbase = {a.base}\n"
                 f"bhp = {a.bhp}\nwheelbase = {wheelbase}\ndrive = {a.drive}\n"
-                + (f"mass = {a.mass}\n" if a.mass else ""))
+                + (f"mass = {a.mass}\n" if a.mass else "")
+                + f"wheel_drop = {drop:.3f}\n"
+                + "".join(f"{k} = {' '.join(map(str, v))}\n" for k, v in lamps.items() if v))
     print(f"{name}: {a.out}")
     return 0
 

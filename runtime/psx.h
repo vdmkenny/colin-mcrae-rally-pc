@@ -61,6 +61,10 @@ typedef struct {
     int base;                       // disc car used for handling, sounds and records
     int bhp, wheelbase, drive;      // for the car menu; drive 0 4WD, 1 FWD, 2 RWD
     int mass;                       // kg, or 0 for the game's (1120 for every car)
+    float lamps[2][3];              // left headlight and fog lamp (m), x 0: none
+    float tail[6][3];               // left tail light outline (m), 4 to 6 points, or its middle
+    int tail_points;
+    float wheel_drop;               // m the race physics lowers the wheels from the model
     uint32_t lba[7], size[7];       // files served from memory (lba 0: from the base car)
     const uint8_t *data[7];
     uint32_t showroom;              // its showroom object in the frontend (0: none)

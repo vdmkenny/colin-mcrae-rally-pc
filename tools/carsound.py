@@ -2,10 +2,13 @@
 """Make a car's engine sound (SOUNDS.BFX) from a disc car's, read from your own disc.
 
 Usage: carsound.py <Colin McRae Rally .cue> <disc car> <out SOUNDS.BFX> [--pitch X] [--whine X]
+                   [--blowoff V]
 
 The engine loops are resampled to play --pitch times higher (the game plays them faster with
 engine speed and tops out near 8000 rpm, so 1.19 makes that 9500), and --whine mixes in a
 supercharger whine at that level (0.2 is clearly audible) that rises with engine speed.
+--blowoff sets the volume (0-127, 0 silent) of the turbo dump valve the game plays when the
+throttle closes.
 """
 import argparse
 import math
@@ -20,6 +23,7 @@ RATE = 44100           # what the game's pitch 0x1000 plays at
 TOP_PITCH = 0.69       # the engine loops' pitch at the top of the rev range
 WHINE_HZ = 1600        # supercharger whine at the top of the rev range
 ENGINE_PROGRAMS = (0, 1, 2, 3, 5, 6)
+BLOWOFF_PROGRAMS = (78, 81)   # played when the throttle closes
 FILTERS = [(0, 0), (60, 0), (115, -52), (98, -55), (122, -60)]
 
 
@@ -124,9 +128,17 @@ def change_loop(data, pitch, whine):
     return encode(out, len(head))
 
 
-def make(bfx, pitch, whine):
+def make(bfx, pitch, whine, blowoff=None):
     vab, vb = chunks(bfx)[:2]
     nprogs = struct.unpack_from("<H", vab, 18)[0]
+    if blowoff is not None:
+        vab = bytearray(vab)
+        used = [p for p in range(128) if vab[32 + 16 * p]]
+        for i, p in enumerate(used):
+            if p in BLOWOFF_PROGRAMS:
+                for t in range(vab[32 + 16 * p]):
+                    vab[32 + 16 * 128 + 32 * (16 * i + t) + 2] = blowoff   # tone volume
+        vab = bytes(vab)
     table = 32 + 16 * 128 + 32 * 16 * nprogs
     sizes = list(struct.unpack_from("<256H", vab, table))
     vags, pos = [], 0
@@ -151,10 +163,11 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--pitch", type=float, default=1.0)
     ap.add_argument("--whine", type=float, default=0.0)
+    ap.add_argument("--blowoff", type=int, help="dump valve volume 0-127 (default: unchanged)")
     a = ap.parse_args()
     with open(data_track(a.cue), "rb") as img:
         bfx = read_file(img, f"CMRALLY/CARS/{a.car.upper()}/SOUNDS.BFX")
-    out = make(bfx, a.pitch, a.whine)
+    out = make(bfx, a.pitch, a.whine, a.blowoff)
     with open(a.out, "wb") as f:
         f.write(out)
     print(f"{a.out}: {len(out)} bytes")

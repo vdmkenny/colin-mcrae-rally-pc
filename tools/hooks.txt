@@ -26,3 +26,4 @@ frontend 80196e10 hook_gear_row_p1
 frontend 8019701c hook_gear_row_p2
 frontend 80195da0 hook_showrooms
 frontend 80186c78 hook_hide_showrooms
+game 8005e1e4 hook_lamps

@@ -51,24 +51,21 @@ Ubuntu 24.04 and older have no SDL3 package: build and install SDL3 from source 
 
 ### Windows (not tested yet)
 
-1. Install [Visual Studio 2022](https://visualstudio.microsoft.com/) (Community is free) with
-   the *Desktop development with C++* workload, which includes CMake and Ninja, plus
-   [Python 3](https://www.python.org/downloads/) and [Git](https://git-scm.com/).
-2. Download `SDL3-devel-<version>-VC.zip` from
-   [SDL's releases](https://github.com/libsdl-org/SDL/releases/latest) and extract it, for
-   example to `C:\SDL3`.
-3. In the *Developer PowerShell for VS 2022*, with `CMAKE_PREFIX_PATH` set to the extracted
-   `SDL3-<version>` folder:
+No Visual Studio needed: [MSYS2](https://www.msys2.org/) provides the compiler, tools and
+SDL3. Install it (or `winget install MSYS2.MSYS2`), open the **MSYS2 UCRT64** shell from the
+Start menu, and run:
 
-   ```powershell
-   $env:CMAKE_PREFIX_PATH = "C:\SDL3\SDL3-3.4.2"
-   git clone https://github.com/vdmkenny/colin-mcrae-rally-pc.git
-   cd colin-mcrae-rally-pc
-   py tools\build_game.py "C:\path\to\Colin McRae Rally.cue"
-   ```
+```bash
+pacman -S --needed git mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,python,sdl3}
+git clone https://github.com/vdmkenny/colin-mcrae-rally-pc.git
+cd colin-mcrae-rally-pc
+python3 tools/build_game.py "C:/path/to/Colin McRae Rally.cue"
+./build/cmrally.exe
+```
 
-4. Run the program the script names when it finishes (`build\cmrally.exe`); `SDL3.dll` is
-   copied beside it.
+`SDL3.dll` is copied beside `cmrally.exe`, so it also starts from Explorer. Visual Studio's
+compiler should work too: point `CMAKE_PREFIX_PATH` at SDL3's `-VC` development zip and run the
+same script from a Developer PowerShell.
 
 ### Playing
 

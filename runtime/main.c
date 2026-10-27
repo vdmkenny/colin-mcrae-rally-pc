@@ -8,8 +8,7 @@
 
 PadState pads[2];
 bool pad_analog_mode = false;
-void sio_set_analog(bool on);
-void sio_set_negcon(bool on);
+void sio_set_port(int port, bool negcon, bool analog);
 static bool negcon_mode;
 enum { CTRL_AUTO, CTRL_DIGITAL, CTRL_DUALSHOCK, CTRL_NEGCON };
 static int controller_type = CTRL_AUTO;
@@ -22,7 +21,7 @@ void trace_dump(void);
 
 static SDL_Window *window;
 static SDL_AudioStream *audio;
-static SDL_Gamepad *gamepad;
+static SDL_Gamepad *gamepads[2];
 static uint32_t frame_rgba[640 * 512];
 
 static uint64_t next_vblank;
@@ -122,8 +121,8 @@ static uint8_t twist8(Sint16 v) {
 
 static uint8_t trigger8(Sint16 v) { return v <= 0 ? 0 : (uint8_t)(v * 255 / 32767); }
 
-static void poll_gamepad(PadState *p) {
-    if (!gamepad) return;
+static void poll_gamepad(PadState *p, SDL_Gamepad *gp, bool negcon) {
+    if (!gp) return;
     static const struct { SDL_GamepadButton b; uint16_t m; } map[] = {
         {SDL_GAMEPAD_BUTTON_SOUTH, PAD_CROSS}, {SDL_GAMEPAD_BUTTON_EAST, PAD_CIRCLE},
         {SDL_GAMEPAD_BUTTON_WEST, PAD_SQUARE}, {SDL_GAMEPAD_BUTTON_NORTH, PAD_TRIANGLE},
@@ -134,22 +133,24 @@ static void poll_gamepad(PadState *p) {
         {SDL_GAMEPAD_BUTTON_DPAD_LEFT, PAD_LEFT}, {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, PAD_RIGHT},
     };
     for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
-        if (SDL_GetGamepadButton(gamepad, map[i].b)) p->buttons |= map[i].m;
-    if (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 12000) p->buttons |= PAD_L2;
-    if (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 12000) p->buttons |= PAD_R2;
-    Sint16 lx = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTX);
-    Sint16 ly = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTY);
+        if (SDL_GetGamepadButton(gp, map[i].b)) p->buttons |= map[i].m;
+    if (SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 12000) p->buttons |= PAD_L2;
+    if (SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 12000) p->buttons |= PAD_R2;
+    Sint16 lx = SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFTX);
+    Sint16 ly = SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFTY);
+    uint8_t keyboard_twist = p->lx;
     p->lx = axis8(lx); p->ly = axis8(ly);
-    p->rx = axis8(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTX));
-    p->ry = axis8(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTY));
-    if (negcon_mode) {
+    p->rx = axis8(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHTX));
+    p->ry = axis8(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHTY));
+    if (negcon) {
         // NeGcon: twist from the left stick, I/II (throttle/brake) from the triggers or
         // the South/West buttons, A/B from North/East, L/R from the shoulders
         p->lx = twist8(lx);
-        uint8_t ti = trigger8(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
-        uint8_t tii = trigger8(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
-        if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_SOUTH)) ti = 255;
-        if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_WEST)) tii = 255;
+        if (p->lx == 0x80) p->lx = keyboard_twist;   // stick centred: keep keyboard steering
+        uint8_t ti = trigger8(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
+        uint8_t tii = trigger8(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
+        if (SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_SOUTH)) ti = 255;
+        if (SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_WEST)) tii = 255;
         if (ti > p->negcon_i) p->negcon_i = ti;
         if (tii > p->negcon_ii) p->negcon_ii = tii;
         p->buttons &= ~(PAD_L2 | PAD_R2);
@@ -165,15 +166,43 @@ static void poll_gamepad(PadState *p) {
     }
 }
 
-static void open_first_gamepad(void) {
-    if (gamepad) return;
+// Controller type per port. "auto" presents a NeGcon where a gamepad is connected (the game
+// supports its analog steering and throttle, but not DualShock sticks), else a digital pad.
+static bool port_negcon[2];
+
+static void update_controller_types(void) {
+    static int shown[2] = {-1, -1};
+    for (int port = 0; port < 2; port++) {
+        int t = controller_type;
+        if (t == CTRL_AUTO) t = gamepads[port] ? CTRL_NEGCON : CTRL_DIGITAL;
+        if (shown[port] != t) LOG("[input] port %d: %s\n", port + 1, controller_names[t]);
+        shown[port] = t;
+        port_negcon[port] = t == CTRL_NEGCON;
+        sio_set_port(port, t == CTRL_NEGCON, t == CTRL_DUALSHOCK);
+    }
+    negcon_mode = port_negcon[0];
+}
+
+// The first two gamepads drive ports 1 and 2 (port 1 also takes the keyboard).
+static void assign_gamepads(void) {
+    for (int i = 0; i < 2; i++)
+        if (gamepads[i] && !SDL_GamepadConnected(gamepads[i])) { SDL_CloseGamepad(gamepads[i]); gamepads[i] = NULL; }
+    if (!gamepads[0] && gamepads[1]) { gamepads[0] = gamepads[1]; gamepads[1] = NULL; }
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    if (ids && n > 0) {
-        gamepad = SDL_OpenGamepad(ids[0]);
-        if (gamepad) LOG("[input] gamepad: %s\n", SDL_GetGamepadName(gamepad));
+    for (int i = 0; ids && i < n; i++) {
+        bool used = false;
+        for (int k = 0; k < 2; k++) used |= gamepads[k] && SDL_GetGamepadID(gamepads[k]) == ids[i];
+        if (used) continue;
+        for (int k = 0; k < 2; k++) {
+            if (gamepads[k]) continue;
+            gamepads[k] = SDL_OpenGamepad(ids[i]);
+            if (gamepads[k]) LOG("[input] port %d gamepad: %s\n", k + 1, SDL_GetGamepadName(gamepads[k]));
+            break;
+        }
     }
     SDL_free(ids);
+    update_controller_types();
 }
 
 static void handle_events(void) {
@@ -184,14 +213,8 @@ static void handle_events(void) {
             LOG("quit\n");
             exit(0);
         case SDL_EVENT_GAMEPAD_ADDED:
-            open_first_gamepad();
-            break;
         case SDL_EVENT_GAMEPAD_REMOVED:
-            if (gamepad && e.gdevice.which == SDL_GetGamepadID(gamepad)) {
-                SDL_CloseGamepad(gamepad);
-                gamepad = NULL;
-                open_first_gamepad();
-            }
+            assign_gamepads();
             break;
         case SDL_EVENT_KEY_DOWN:
             if (e.key.scancode == SDL_SCANCODE_F11 ||
@@ -222,21 +245,25 @@ static void handle_events(void) {
             break;
         }
     }
-    PadState *p = &pads[0];
-    p->buttons = 0;
-    p->lx = p->ly = p->rx = p->ry = 0x80;
-    p->negcon_i = p->negcon_ii = p->negcon_l = 0;
-    p->connected = true;
-    poll_keyboard(p);
-    p->buttons |= script_buttons(frame_count, p);
-    if (negcon_mode) {
-        // keyboard on a NeGcon: arrows twist fully, X/Z are I/II
-        if (p->buttons & PAD_LEFT) p->lx = 0x00;
-        if (p->buttons & PAD_RIGHT) p->lx = 0xFF;
-        if (p->buttons & PAD_CROSS) p->negcon_i = 255;
-        if (p->buttons & PAD_SQUARE) p->negcon_ii = 255;
+    for (int port = 0; port < 2; port++) {
+        PadState *p = &pads[port];
+        p->buttons = 0;
+        p->lx = p->ly = p->rx = p->ry = 0x80;
+        p->negcon_i = p->negcon_ii = p->negcon_l = 0;
+        p->connected = port == 0 || gamepads[port];
+        if (port == 0) {
+            poll_keyboard(p);
+            p->buttons |= script_buttons(frame_count, p);
+            if (port_negcon[0]) {
+                // keyboard on a NeGcon: arrows twist fully, X/Z are I/II
+                if (p->buttons & PAD_LEFT) p->lx = 0x00;
+                if (p->buttons & PAD_RIGHT) p->lx = 0xFF;
+                if (p->buttons & PAD_CROSS) p->negcon_i = 255;
+                if (p->buttons & PAD_SQUARE) p->negcon_ii = 255;
+            }
+        }
+        poll_gamepad(p, gamepads[port], port_negcon[port]);
     }
-    poll_gamepad(p);
 }
 
 extern int frame_interval_override;
@@ -534,15 +561,8 @@ int main(int argc, char **argv) {
     audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
     if (audio) SDL_ResumeAudioStreamDevice(audio);
     else LOG("audio: %s\n", SDL_GetError());
-    open_first_gamepad();
-    // The game supports Namco's NeGcon (analog steering and throttle) but not analog sticks
-    // on a DualShock, so a gamepad is presented as a NeGcon unless configured otherwise.
-    int ctype = controller_type == CTRL_AUTO ? (gamepad ? CTRL_NEGCON : CTRL_DIGITAL) : controller_type;
-    negcon_mode = ctype == CTRL_NEGCON;
-    pad_analog_mode = ctype == CTRL_DUALSHOCK;
-    sio_set_analog(pad_analog_mode);
-    sio_set_negcon(negcon_mode);
-    LOG("[input] controller: %s\n", controller_names[ctype]);
+    pad_analog_mode = controller_type == CTRL_DUALSHOCK;
+    assign_gamepads();
 
     memset(psx_ram, 0, sizeof psx_ram);
     sched_init();

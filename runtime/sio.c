@@ -201,6 +201,9 @@ void sio_write(uint32_t addr, uint32_t v, int size) {
     }
 }
 
-void sio_set_analog(bool on) { padsio[0].analog = padsio[1].analog = on; }
 
-void sio_set_negcon(bool on) { padsio[0].negcon = padsio[1].negcon = on; }
+
+void sio_set_port(int port, bool negcon, bool analog) {
+    padsio[port & 1].negcon = negcon;
+    padsio[port & 1].analog = analog;
+}

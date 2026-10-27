@@ -60,7 +60,8 @@ location. Then:
 
 ## Controls
 
-With a gamepad connected the game sees a NeGcon (`controller = negcon`, the default):
+With a gamepad connected the game sees a NeGcon (`controller = auto`, the default, switches
+as gamepads come and go). A second gamepad plays on port 2 for two-player split screen.
 
 | Game | Gamepad | Keyboard |
 |---|---|---|

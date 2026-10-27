@@ -26,6 +26,9 @@ static uint32_t frame_rgba[640 * 512];
 
 static uint64_t next_vblank;
 static uint64_t pace_ns;   // target time of the end of the previous vblank
+// Length of one emulated vblank in real time: 59.94 Hz, or exactly the display's rate when
+// buffer swaps pace emulation (so the timer never fights vsync).
+static uint64_t vblank_ns = 1000000000ull * 1001 / 60000;
 static bool fast_forward;
 static bool vsync = true;
 static bool vsync_paces;     // the display runs at ~60 Hz, so buffer swaps pace emulation
@@ -289,7 +292,7 @@ static void present(float alpha) {
 static void present_vblank(void) {
     int interval = render_frame_interval(), k = render_vblanks_since_flip();
     int n = presents_per_vblank;
-    const uint64_t frame_ns = 1000000000ull * 1001 / 60000;
+    const uint64_t frame_ns = vblank_ns;
     uint64_t deadline = pace_ns + frame_ns;   // when this vblank's time is up
     for (int p = 0; p < n; p++) {
         // Extra images are optional: skip them rather than slow the game down.
@@ -339,13 +342,13 @@ static void push_audio(void) {
 }
 
 static void pace(void) {
-    const uint64_t frame_ns = 1000000000ull * 1001 / 60000;   // 59.94 Hz
     uint64_t now = SDL_GetTicksNS();
-    if (!pace_ns || now > pace_ns + frame_ns * 4) pace_ns = now;
-    pace_ns += frame_ns;
+    if (!pace_ns || now > pace_ns + vblank_ns * 4) pace_ns = now;
+    pace_ns += vblank_ns;
     if (fast_forward) { pace_ns = now; return; }
-    if (vsync_paces) return;   // SDL_GL_SwapWindow already waited for the display
-    if (pace_ns > now) SDL_DelayPrecise(pace_ns - now);
+    // With vsync the swaps normally take us right up to the deadline; the timer is the safety
+    // net for when they do not block (occluded window, vsync not honoured by the system).
+    if (pace_ns > now + (vsync_paces ? 1000000u : 0u)) SDL_DelayPrecise(pace_ns - now);
 }
 
 void host_frame(void) {
@@ -581,13 +584,14 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (opts.turbo) vsync = false;
-    SDL_GL_SetSwapInterval(vsync ? 1 : 0);
+    SDL_GL_SetSwapInterval(vsync && !getenv("CMR_TEST_NONBLOCKING_SWAP") ? 1 : 0);
     const SDL_DisplayMode *dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
     float hz = dm ? dm->refresh_rate : 60.0f;
     if (vsync && hz >= 89.0f) presents_per_vblank = (int)(hz / 59.94f + 0.5f) > 4 ? 4 : (int)(hz / 59.94f + 0.5f);
     if (presents_override > 0) presents_per_vblank = presents_override > 4 ? 4 : presents_override;
     float target = 59.94f * presents_per_vblank;
     vsync_paces = vsync && hz > target - 2.0f && hz < target + 2.0f;
+    if (vsync_paces) vblank_ns = (uint64_t)(1e9 * presents_per_vblank / hz);
     LOG("[host] display %.2f Hz, %d image%s per vblank, %s\n", hz, presents_per_vblank,
         presents_per_vblank > 1 ? "s" : "", vsync_paces ? "vsync paces emulation" : "timer paces emulation");
     SDL_AudioSpec spec = {SDL_AUDIO_S16, 2, 44100};

@@ -456,8 +456,30 @@ static void watch_ram(void) {
     }
 }
 
+// Debug aid: CMR_POKE=frame:addr=value[,...] writes RAM words at a vblank, e.g. to skip ahead
+// in a stage. The value may be @addr to copy another word.
+static void poke_ram(void) {
+    const char *e = getenv("CMR_POKE");
+    while (e && *e) {
+        long f = strtol(e, (char **)&e, 10);
+        uint32_t a = (uint32_t)strtoul(e + 1, (char **)&e, 16) & 0x1FFFFC, v;
+        if (e[1] == '@') {
+            uint32_t src = (uint32_t)strtoul(e + 2, (char **)&e, 16) & 0x1FFFFC;
+            memcpy(&v, psx_ram + src, 4);
+        } else {
+            v = (uint32_t)strtoul(e + 1, (char **)&e, 16);
+        }
+        if (f == frame_count) {
+            memcpy(psx_ram + a, &v, 4);
+            LOG("[poke] frame %d: %06x = %08x\n", frame_count, a, v);
+        }
+        if (*e == ',') e++;
+    }
+}
+
 static void vblank_event(void) {
     watch_ram();
+    poke_ram();
     static int watching = -1;
     if (watching < 0) watching = getenv("CMR_WATCH") != NULL;
     if (watching) {

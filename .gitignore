@@ -1,0 +1,29 @@
+# Game data: never commit anything from the disc
+game/
+*.bin
+*.cue
+*.iso
+*.img
+*.exe
+*.EXE
+*.STR
+*.XA
+*.BFX
+*.TIM
+*.VRM
+
+# Ghidra project and exports (derived from the game binaries)
+ghidra/project/
+ghidra/out/
+ghidra/run.log
+
+# Recompiler output (derived from the game binaries)
+generated/
+
+# Build output and local state
+build/
+*.o
+*.mcd
+saves/
+.DS_Store
+__pycache__/

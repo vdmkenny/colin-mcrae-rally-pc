@@ -752,8 +752,9 @@ static void dump_frame(OpList *l) {
     for (int i = 0; i < l->n; i++) {
         Op *o = &l->ops[i];
         if (o->type != OP_TRI) continue;
-        LOG("[hw] %d id=%u kind=%d semi=%d tex=%d page=%d,%d win=%05x area=%d,%d", i, o->p.id, o->p.kind, o->p.semi,
-            o->p.textured, o->p.tex_x, o->p.tex_y, o->p.texwin, o->a[0], o->a[1]);
+        LOG("[hw] %d id=%u kind=%d semi=%d tex=%d depth=%d raw=%d page=%d,%d clut=%d,%d win=%05x area=%d,%d", i, o->p.id,
+            o->p.kind, o->p.semi, o->p.textured, o->p.depth, o->p.raw, o->p.tex_x, o->p.tex_y, o->p.clut_x, o->p.clut_y,
+            o->p.texwin, o->a[0], o->a[1]);
         for (int k = 0; k < 3; k++)
             LOG(" (%.3f,%.3f w=%.1f %s uv=%.2f,%.2f)", o->v[k].x - o->a[0], o->v[k].y - o->a[1], o->v[k].w,
                 o->v[k].precise ? "p" : "i", o->v[k].u, o->v[k].v);

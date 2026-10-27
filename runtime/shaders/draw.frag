@@ -42,6 +42,8 @@ vec4 decode(uint t) {
 void main() {
     uint flags = v_tex.w;
     vec4 col = v_col;
+    // size of a screen pixel in texels (at most one: minified textures keep plain bilinear)
+    vec2 pixel = clamp(fwidth(v_uv), vec2(1.0 / 64.0), vec2(1.0));
     if ((flags & 4u) != 0u) {
         uint pass = (flags >> 4) & 3u;
         vec4 t;
@@ -56,14 +58,26 @@ void main() {
             uint t00 = texel(b0), t10 = texel(ivec2(b1.x, b0.y)), t01 = texel(ivec2(b0.x, b1.y)), t11 = texel(b1);
             vec4 c00 = t00 == 0u ? vec4(0) : decode(t00), c10 = t10 == 0u ? vec4(0) : decode(t10);
             vec4 c01 = t01 == 0u ? vec4(0) : decode(t01), c11 = t11 == 0u ? vec4(0) : decode(t11);
-            t = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
-            if (t.a < 0.5) discard;
-            t.rgb /= t.a;
+            // coverage: shape outlines (transparent texels) use plain bilinear and stay smooth
+            vec4 vis = vec4(t00 != 0u, t10 != 0u, t01 != 0u, t11 != 0u);
+            float a = mix(mix(vis.x, vis.y, f.x), mix(vis.z, vis.w, f.x), f.y);
+            if (a < 0.5) discard;
+            // Plain bilinear smears pixel art (text, HUD) into mush: where the visible texels differ
+            // strongly in brightness, the blend between them is narrowed to about one screen pixel,
+            // so hard colour edges stay crisp; soft textures (terrain, photos) keep plain bilinear.
+            const vec3 luma = vec3(0.299, 0.587, 0.114);
+            vec4 l = vec4(dot(c00.rgb, luma), dot(c10.rgb, luma), dot(c01.rgb, luma), dot(c11.rgb, luma));
+            vec4 lhi = mix(vec4(-1.0), l, vis), llo = mix(vec4(2.0), l, vis);
+            float contrast = max(max(lhi.x, lhi.y), max(lhi.z, lhi.w)) - min(min(llo.x, llo.y), min(llo.z, llo.w));
+            vec2 fs = mix(f, clamp((f - 0.5) / pixel + 0.5, 0.0, 1.0), smoothstep(0.25, 0.5, contrast));
+            vec4 ts = mix(mix(c00, c10, fs.x), mix(c01, c11, fs.x), fs.y);
+            vec4 tp = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+            t = vec4((ts.a > 0.01 ? ts.rgb / ts.a : tp.rgb / tp.a), 1.0);
             // semi-transparent if most of the visible texels mixed here are (the nearest texel
             // alone may be a transparent one at the edge of a translucent shape)
             vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
             float s = dot(w, vec4((t00 & 0x8000u) != 0u, (t10 & 0x8000u) != 0u, (t01 & 0x8000u) != 0u, (t11 & 0x8000u) != 0u));
-            stp = s >= 0.5 * t.a;
+            stp = s >= 0.5 * a;
         } else {
             uint tn = texel(ivec2(floor(v_uv)));
             if (tn == 0u) discard;

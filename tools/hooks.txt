@@ -1,0 +1,3 @@
+# Native hooks run at the entry of a recompiled function: <module> <address> <C function>.
+# A hook returns nonzero when it fully replaces the function. See runtime/hooks.c.
+game 80096cd4 hook_set_frame_interval

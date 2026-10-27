@@ -150,6 +150,7 @@ static bool sector_ready;
 
 enum { ST_IDLE, ST_READING, ST_PLAYING };
 static int drive_state;
+static int play_track;   // track being played (by file range, so pregaps count as their track)
 static int report_counter;
 
 // pending interrupts (the controller delivers one at a time)
@@ -349,7 +350,8 @@ static void read_tick(void) {
     } else if (drive_state == ST_PLAYING) {
         uint8_t buf[2352];
         int ti = track_index_for(cur_lba);
-        if (cur_lba >= disc_end_lba || (ti + 1 < num_tracks && cur_lba >= tracks[ti + 1].file_lba && (mode & 0x02))) {
+        if (cur_lba >= disc_end_lba ||
+            (play_track + 1 < num_tracks && cur_lba >= tracks[play_track + 1].file_lba && (mode & 0x02))) {
             // end of track with AutoPause
             drive_state = ST_IDLE;
             stat &= ~0x80;
@@ -384,7 +386,8 @@ static void read_tick(void) {
 
 static void command(uint8_t c) {
     uint8_t r[16];
-    DBG(2, "cdrom cmd %02x (%d params: %02x %02x %02x)\n", c, nparams, params[0], params[1], params[2]);
+    DBG(2, "cdrom cmd %02x (%d params: %02x %02x %02x) @%.2fs\n", c, nparams, params[0], params[1], params[2],
+        (double)cpu.cycles / PSX_CLOCK);
     switch (c) {
     case 0x01: irq_stat(3, T_ACK); stat &= ~0x10; break;   // Getstat
     case 0x02:   // Setloc
@@ -403,6 +406,7 @@ static void command(uint8_t c) {
         }
         drive_state = ST_PLAYING;
         report_counter = 0;
+        play_track = (int)(track_for(cur_lba) - tracks);
         stat = (stat & ~0xE0) | 0x80;
         irq_stat(3, T_ACK);
         sched_at(EV_CDROM_READ, cpu.cycles + T_SECOND, read_tick);
@@ -548,6 +552,7 @@ void cdrom_write(int reg, uint8_t v) {
         break;
     case 0x32: pend_lr = v; break;
     case 0x33:
+        DBG(2, "[cd] volume apply %02x: ll=%02x lr=%02x rl=%02x rr=%02x\n", v, pend_ll, pend_lr, pend_rl, pend_rr);
         adpcm_muted = v & 1;
         if (v & 0x20) { vol_ll = pend_ll; vol_lr = pend_lr; vol_rl = pend_rl; vol_rr = pend_rr; }
         break;

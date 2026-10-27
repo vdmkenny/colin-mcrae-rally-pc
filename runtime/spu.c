@@ -322,6 +322,8 @@ uint16_t spu_read(uint32_t addr) {
 void spu_write(uint32_t addr, uint16_t v) {
     uint32_t off = addr & 0x3FE;
     spu_run_to(cpu.cycles);
+    if (off + 0x1C00 == 0x1DAA || off + 0x1C00 == 0x1DB0 || off + 0x1C00 == 0x1DB2 || off + 0x1C00 == 0x1D80)
+        DBG(2, "[spu] %04x = %04x @%.2fs\n", off + 0x1C00, v, (double)cpu.cycles / PSX_CLOCK);
     regs[off >> 1] = v;
     if (off < 0x180) {
         int i = off >> 4;

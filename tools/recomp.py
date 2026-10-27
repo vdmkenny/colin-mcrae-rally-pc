@@ -39,6 +39,7 @@ class Module:
         self.cache = {}
         self.warnings = []
         self.pgxp_regs = set()
+        self.hooks = {}
 
     def insn(self, a):
         i = self.cache.get(a)
@@ -234,6 +235,17 @@ def load_ghidra(path):
             parts = line.split()
             if parts:
                 out.add(int(parts[0], 16))
+    return out
+
+
+def load_hooks(path):
+    """hooks.txt: '<module> <address> <C function>' per line; the function runs on entry."""
+    out = collections.defaultdict(dict)
+    if os.path.exists(path):
+        for line in open(path):
+            line = line.split("#")[0].split()
+            if len(line) == 3:
+                out[line[0]][int(line[1], 16)] = line[2]
     return out
 
 
@@ -442,6 +454,9 @@ def gen_function(m, entry, protos):
             labels.add(a + 4)  # executing a slot directly continues after it
 
     out = [f"void {m.fname(entry)}(CPU *c) {{", f"FN_ENTER(0x{entry:08x}u);"]
+    hook = m.hooks.get(entry)
+    if hook:
+        out.append(f"if ({hook}(c)) return;")
     # Hand-written code sometimes keeps ra in another register and returns with
     # `jr reg`; an unresolved indirect jump to the entry return address is a return.
     if any(m.insn(a).op == "jr" and m.insn(a).rs != 31 and a not in tables for a in addrs if not is_slot(a)):
@@ -592,6 +607,8 @@ def generate(m, outdir):
                 f.write("\n\n")
     with open(os.path.join(outdir, f"{m.name}.h"), "w") as f:
         f.write('#pragma once\n#include "recomp.h"\n\n')
+        for h in sorted(set(m.hooks.values())):
+            f.write(f"int {h}(CPU *c);\n")
         for e in sorted(done | protos):
             f.write(f"void {m.fname(e)}(CPU *c);\n")
     with open(os.path.join(outdir, f"{m.name}_table.c"), "w") as f:
@@ -610,12 +627,17 @@ def generate(m, outdir):
 def main():
     bins, gdir, outdir = sys.argv[1], sys.argv[2], sys.argv[3]
     extra_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entries")
+    hooks = load_hooks(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks.txt"))
     sources = []
     for name, fn, base, entry in MODULES:
         m = Module(name, os.path.join(bins, fn), base, entry,
                    load_ghidra(os.path.join(gdir, f"{name}.funcs.txt")),
                    load_extra(os.path.join(extra_dir, f"{name}.txt")))
         m.discover()
+        m.hooks = hooks.get(name, {})
+        for a in m.hooks:
+            m.entries.add(a)
+            m.boundaries.add(a)
         nf, nfiles = generate(m, os.path.join(outdir, name))
         sources.append((name, nfiles))
         print(f"{name}: {nf} functions in {nfiles} files, {len(m.warnings)} warnings")

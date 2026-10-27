@@ -193,6 +193,7 @@ static void handle_events(void) {
 }
 
 void sio_set_analog(bool on);
+extern int frame_interval_override;
 
 // ----------------------------------------------------------------- frames
 static void present(void) {
@@ -207,9 +208,28 @@ static void present(void) {
     }
 }
 
+static FILE *wav_out;
+static uint32_t wav_frames;
+
+static void wav_header(void) {
+    uint32_t data = wav_frames * 4, riff = 36 + data, fmt_size = 16, rate = 44100, byte_rate = 44100 * 4;
+    uint16_t pcm = 1, ch = 2, align = 4, bits = 16;
+    fseek(wav_out, 0, SEEK_SET);
+    fwrite("RIFF", 1, 4, wav_out); fwrite(&riff, 4, 1, wav_out); fwrite("WAVEfmt ", 1, 8, wav_out);
+    fwrite(&fmt_size, 4, 1, wav_out); fwrite(&pcm, 2, 1, wav_out); fwrite(&ch, 2, 1, wav_out);
+    fwrite(&rate, 4, 1, wav_out); fwrite(&byte_rate, 4, 1, wav_out); fwrite(&align, 2, 1, wav_out);
+    fwrite(&bits, 2, 1, wav_out); fwrite("data", 1, 4, wav_out); fwrite(&data, 4, 1, wav_out);
+    fseek(wav_out, 0, SEEK_END);
+}
+
+static void close_wav(void) {
+    if (wav_out) { wav_header(); fclose(wav_out); wav_out = NULL; }
+}
+
 static void push_audio(void) {
     int16_t buf[8192 * 2];
     int n = spu_take(buf, 8192);
+    if (wav_out && n) { fwrite(buf, 4, (size_t)n, wav_out); wav_frames += (uint32_t)n; }
     if (!audio || !n || fast_forward) return;
     // Dynamic rate control: nudge the playback rate so the queue hovers around ~50 ms,
     // which absorbs the 60 vs 59.94 Hz difference when the display paces emulation.
@@ -301,6 +321,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--widescreen")) render_cfg.widescreen = true;
         else if (!strcmp(argv[i], "--no-pgxp")) pgxp_enabled = false;
         else if (!strcmp(argv[i], "--no-vsync")) vsync = false;
+        else if (!strcmp(argv[i], "--interval") && i + 1 < argc) frame_interval_override = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc) {
+            wav_out = fopen(argv[++i], "wb");
+            if (wav_out) { wav_header(); atexit(close_wav); }
+        }
         else if (!strcmp(argv[i], "--analog")) pad_analog_mode = true;
         else if (!strcmp(argv[i], "--cpu") && i + 1 < argc) cycles_per_insn = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-dither")) gpu_dither_enabled = false;

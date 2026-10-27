@@ -606,55 +606,40 @@ def medium_files(gt2, paint, base, rim):
     return cmrcar.ModelFile(scenes), cmrcar.TIM(2, None, (832, 0, 64, 255, data))
 
 
+def brake_red(r, g, b):
+    """A brake lens colour: red, not an amber blinker or a lamp's dark outline."""
+    return r >= 48 and g <= 0.6 * r and b <= 0.65 * r
+
+
+def face_point(t, u, v):
+    """Where texture coordinates u, v fall on a face: (how far inside it, the point)."""
+    (p0, _), (p1, _), (p2, _) = t[0]
+    (u0, v0), (u1, v1), (u2, v2) = t[1]
+    det = (u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0) or 1e-9
+    a = ((u - u0) * (v2 - v0) - (u2 - u0) * (v - v0)) / det
+    b = ((u1 - u0) * (v - v0) - (u - u0) * (v1 - v0)) / det
+    return min(a, b, 1 - a - b), tuple(q0 + a * (q1 - q0) + b * (q2 - q0) for q0, q1, q2 in zip(p0, p1, p2))
+
+
 def lamp_texels(rear, paint, red):
-    """The corners of the opaque texels (only red ones if red) painted on faces, placed on the faces."""
-    pts = []
+    """The opaque texels (only brake lens ones if red) painted on faces: {(u, v): the face}."""
+    out = {}
     for t in rear:
-        (p0, _), (p1, _), (p2, _) = t[0]
-        (u0, v0), (u1, v1), (u2, v2) = t[1]
-        det = (u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0)
-        if not det:
-            continue
+        us, vs = [u for u, _ in t[1]], [v for _, v in t[1]]
         pal = paint["palettes"][t[2]]
-
-        def bary(u, v):
-            return (((u - u0) * (v2 - v0) - (u2 - u0) * (v - v0)) / det,
-                    ((u1 - u0) * (v - v0) - (u - u0) * (v1 - v0)) / det)
-
-        def at(u, v):
-            a, b = bary(u, v)
-            return tuple(q0 + a * (q1 - q0) + b * (q2 - q0) for q0, q1, q2 in zip(p0, p1, p2))
-        for v in range(min(v0, v1, v2), max(v0, v1, v2)):
-            for u in range(min(u0, u1, u2), max(u0, u1, u2)):
-                a, b = bary(u + 0.5, v + 0.5)
+        for v in range(min(vs), max(vs)):
+            for u in range(min(us), max(us)):
                 c = pal[paint["pixels"][v * 256 + u]]
-                r, g, bl = rgb_of(c)
-                if (a < -1e-6 or b < -1e-6 or a + b > 1 + 1e-6 or not c & 0x7fff
-                        or red and not (r >= 40 and r >= g + 24 and r >= bl + 16)):
-                    continue
-                pts += [at(u + du, v + dv) for du in (0, 1) for dv in (0, 1)]
-    return pts
+                if (face_point(t, u + 0.5, v + 0.5)[0] >= -1e-6 and c & 0x7fff
+                        and (not red or brake_red(*rgb_of(c)))):
+                    out[u, v] = t
+    return out
 
 
-def tail_light(tris, paint):
-    """The game lights a brake light by drawing its outline (4 to 6 points) over it: the outline of
-    the red lens painted on the left tail lamp's rear-facing faces (the whole lamp when none of it
-    is red), seen from behind, out 1 cm and wound outward. Only the faces within 25 degrees of the
-    one facing most backward count, not where the lamp wraps round the corner."""
-    facing = lambda t: norm([sum(n[i] for _, n in t[0]) for i in range(3)])
-    rear = [t for t in tris if t[4] == LAMP and t[1] and t[0][0][0][0] < 0 and t[0][0][0][2] > 0
-            and facing(t)[0] < -0.5]
-    if not rear:
-        return None
-    back = facing(min(rear, key=lambda t: facing(t)[0]))
-    rear = [t for t in rear if sum(a * b for a, b in zip(facing(t), back)) > math.cos(math.radians(25))]
-    pts = lamp_texels(rear, paint, True) or lamp_texels(rear, paint, False)
-    if len(pts) < 4:
-        return None
-    # convex hull in the y-z plane, wound one way, then cut down to 6 corners by dropping the
-    # corner that cuts off least
-    pts = sorted(set(pts), key=lambda p: (p[2], p[1]))
-    turn = lambda o, a, b: (a[2] - o[2]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[2] - o[2])
+def convex_hull(pts):
+    """The convex hull of 2D points, counter-clockwise."""
+    pts = sorted(set(pts))
+    turn = lambda o, a, b: (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
     hull = []
     for seq in (pts, pts[::-1]):
         part = []
@@ -663,14 +648,129 @@ def tail_light(tris, paint):
                 part.pop()
             part.append(p)
         hull += part[:-1]
-    while len(hull) > 6:
-        cut = lambda i: abs(turn(hull[i - 1], hull[i], hull[(i + 1) % len(hull)]))
-        hull.pop(min(range(len(hull)), key=cut))
-    n = norm([sum(nn[i] for t in rear for _, nn in t[0]) for i in range(3)])
-    face = norm(cross([b - a for a, b in zip(hull[0], hull[1])], [b - a for a, b in zip(hull[0], hull[2])]))
-    if sum(a * b for a, b in zip(face, n)) < 0:
-        hull.reverse()
-    return [round(c + d * 0.01, 3) for p in hull for c, d in zip(p, n)]
+    return hull
+
+
+def fewer_corners(poly, keep, most):
+    """A polygon cut down to most corners besides those in keep, dropping the corner that cuts off
+    least each time."""
+    poly = list(poly)
+    area = lambda o, a, b: abs((a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]))
+    while sum(p not in keep for p in poly) > most:
+        i = min((i for i, p in enumerate(poly) if p not in keep),
+                key=lambda i: area(poly[i - 1], poly[i], poly[(i + 1) % len(poly)]))
+        poly.pop(i)
+    return poly
+
+
+def tail_light(tris, paint):
+    """The game lights a brake light by drawing its outline (4 to 6 points, as a fan of triangles)
+    over it: here the red brake lens painted on the left tail lamp's rear-facing faces (its largest
+    patch of red, or the whole lamp when none of it is red), out 1 cm and wound outward. Only the
+    faces within 25 degrees of the one facing most backward count, not where the lamp wraps round
+    the corner. A glow cutting straight across a crease in the lamp is drawn behind the lamp, so
+    where the lens crosses one, the fan's middle edge follows the crease and each half lies on its
+    own flat part."""
+    facing = lambda t: norm([sum(n[i] for _, n in t[0]) for i in range(3)])
+    dot = lambda a, b: sum(x * y for x, y in zip(a, b))
+    rear = [t for t in tris if t[4] == LAMP and t[1] and t[0][0][0][0] < 0 and t[0][0][0][2] > 0
+            and facing(t)[0] < -0.5]
+    if not rear:
+        return None
+    back = facing(min(rear, key=lambda t: facing(t)[0]))
+    rear = [t for t in rear if dot(facing(t), back) > math.cos(math.radians(25))]
+    # the lamp's flat parts: faces in planes within 5 degrees, with their outward normal
+    parts, part_of = [], {}
+    for t in rear:
+        (a, _), (b, _), (c, _) = t[0]
+        n = norm(cross([q - p for p, q in zip(a, b)], [q - p for p, q in zip(a, c)]))
+        n = n if dot(n, facing(t)) > 0 else tuple(-x for x in n)
+        i = next((i for i, (pn, _) in enumerate(parts) if dot(n, pn) > math.cos(math.radians(5))), len(parts))
+        if i == len(parts):
+            parts.append((n, []))
+        parts[i][1].append(t)
+        part_of[id(t)] = i
+    texels = lamp_texels(rear, paint, True) or lamp_texels(rear, paint, False)
+    patches, seen = [], set()
+    for first in texels:
+        if first in seen:
+            continue
+        patch, todo = [], [first]
+        seen.add(first)
+        while todo:
+            u, v = todo.pop()
+            patch.append((u, v))
+            for near in ((u + 1, v), (u - 1, v), (u, v + 1), (u, v - 1)):
+                if near in texels and near not in seen:
+                    seen.add(near)
+                    todo.append(near)
+        patches.append(patch)
+    patch = max(patches, key=len, default=[])
+    if not patch:
+        return None
+    # the part with most of the lens, and the next one if they meet at a crease (two shared corners)
+    by_part = collections.Counter(part_of[id(texels[uv])] for uv in patch).most_common()
+    keep, crease = [by_part[0][0]], None
+    for i, _ in by_part[1:]:
+        corners = {tuple(round(c, 6) for c in p): uv for t in parts[keep[0]][1] for (p, _), uv in zip(t[0], t[1])}
+        shared = {corners[k] for t in parts[i][1] for p, _ in t[0] if (k := tuple(round(c, 6) for c in p)) in corners}
+        if len(shared) == 2:
+            keep.append(i)
+            crease = sorted(shared)
+            break
+    patch = [uv for uv in patch if part_of[id(texels[uv])] in keep]
+    hull = convex_hull([(u + du, v + dv) for u, v in patch for du in (0, 1) for dv in (0, 1)])
+    if crease:
+        (cu, cv), (du, dv) = crease
+        side = lambda p: (du - cu) * (p[1] - cv) - (dv - cv) * (p[0] - cu)
+        on = lambda p: abs(side(p)) < 1e-6
+
+        def half(sign):
+            out = []
+            for i, p in enumerate(hull):
+                q = hull[(i + 1) % len(hull)]
+                sp, sq = sign * side(p), sign * side(q)
+                if sp >= -1e-6:
+                    out.append(p)
+                if sp * sq < 0 and not on(p) and not on(q):
+                    k = sp / (sp - sq)
+                    out.append((p[0] + k * (q[0] - p[0]), p[1] + k * (q[1] - p[1])))
+            return out
+        halves = [half(1), half(-1)]
+        bends = {p for h in halves for p in h if on(p)}
+        if len(bends) == 2 and all(any(not on(p) for p in h) for h in halves):
+            halves = [fewer_corners(h, bends, 2) for h in halves]
+            pts = list(bends) + [p for h in halves for p in h if not on(p)]
+        else:
+            crease = None
+    if not crease:
+        pts = fewer_corners(hull, (), 6)
+    # each corner on the lamp, in the part on its side of the crease, out 1 cm from it
+    mid = [sum(p[i] for p in pts) / len(pts) for i in range(2)]
+    pts.sort(key=lambda p: math.atan2(p[1] - mid[1], p[0] - mid[0]))
+    first = [sum(c) / len(c) + 0.5 for c in zip(*(uv for uv in patch if part_of[id(texels[uv])] == keep[0]))]
+    corners = []
+    for p in pts:
+        if crease and on(p):
+            mine, n = keep[0], norm([a + b for a, b in zip(parts[keep[0]][0], parts[keep[1]][0])])
+        else:
+            mine = keep[0] if not crease or side(p) * side(first) > 0 else keep[1]
+            n = parts[mine][0]
+        _, at = max((face_point(t, *p) for t in parts[mine][1]), key=lambda fp: fp[0])
+        corners.append((p, tuple(c + d * 0.01 for c, d in zip(at, n))))
+    # wound outward, then turned so the crease is the fan's middle edge
+    newell = [sum((a[1][(j + 1) % 3] - b[1][(j + 1) % 3]) * (a[1][(j + 2) % 3] + b[1][(j + 2) % 3])
+                  for a, b in zip(corners, corners[1:] + corners[:1])) for j in range(3)]
+    if dot(newell, back) < 0:
+        corners.reverse()
+    if crease:
+        middle = {4: {0, 2}, 5: {0, 3}, 6: {1, 4}}[len(corners)]
+        for r in range(len(corners)):
+            turned = corners[r:] + corners[:r]
+            if {i for i, (p, _) in enumerate(turned) if on(p)} == middle:
+                corners = turned
+                break
+    return [round(c, 3) for _, q in corners for c in q]
 
 
 def lamp_centres(gt2, paint, dy):

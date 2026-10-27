@@ -1,4 +1,4 @@
-// Hardware renderer interface (render_gl.c), fed by the software GPU.
+// Hardware renderer interface (render_gpu.c), fed by the software GPU.
 #pragma once
 #include "psx.h"
 
@@ -42,6 +42,7 @@ extern RenderConfig render_cfg;
 extern bool widescreen_active;   // widescreen applies to the current frames (3D gameplay)
 
 bool render_init(SDL_Window *window);
+bool render_set_vsync(bool on);   // false if that mode is unavailable
 // alpha: how far into the current game frame this display refresh is (1 = the frame itself)
 void render_present(const DisplayInfo *d, const uint32_t *rgba_1x, float alpha);
 int render_frame_interval(void);       // vblanks the last game frame lasted
@@ -57,5 +58,4 @@ void hw_fill(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b);
 void hw_upload(int x, int y, int w, int h);
 void hw_copy(int sx, int sy, int dx, int dy, int w, int h);
 void hw_vram_changed(void);
-void hw_flush(void);
 void hw_flip(void);   // the game switched the displayed framebuffer

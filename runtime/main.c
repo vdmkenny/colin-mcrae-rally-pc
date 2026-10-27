@@ -47,7 +47,7 @@ static struct {
     bool turbo;              // testing: no frame pacing
     bool mute;               // no audio output (WAV capture still works)
     bool hidden;             // testing: no visible window
-} opts = {NULL, false, 3, 0, 0, ".", NULL, false, false, false};
+} opts = {.scale = 3, .shot_dir = "."};
 
 static int frame_count;
 
@@ -651,22 +651,17 @@ int main(int argc, char **argv) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     int win_w = (render_cfg.widescreen ? 427 : 320) * opts.scale;
     window = SDL_CreateWindow("Colin McRae Rally", win_w, 240 * opts.scale,
-                              SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+                              SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
                                   (opts.fullscreen ? SDL_WINDOW_FULLSCREEN : 0) |
                                   (opts.hidden ? SDL_WINDOW_HIDDEN : 0));
     if (!window || !render_init(window)) {
-        fprintf(stderr, "Cannot create an OpenGL 3.3 window: %s\n", SDL_GetError());
+        fprintf(stderr, "Cannot start the GPU renderer (needs Vulkan or Metal): %s\n", SDL_GetError());
         return 1;
     }
     if (opts.turbo) vsync = false;
-    SDL_GL_SetSwapInterval(vsync && !getenv("CMR_TEST_NONBLOCKING_SWAP") ? 1 : 0);
+    if (!render_set_vsync(vsync && !getenv("CMR_TEST_NONBLOCKING_SWAP")) && vsync) vsync = false;
     const SDL_DisplayMode *dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
     float hz = dm ? dm->refresh_rate : 60.0f;
     if (vsync && hz >= 89.0f) presents_per_vblank = (int)(hz / 59.94f + 0.5f) > 4 ? 4 : (int)(hz / 59.94f + 0.5f);

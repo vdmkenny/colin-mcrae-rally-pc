@@ -18,7 +18,7 @@ include(${GEN_DIR}/sources.cmake)
 set(RUNTIME_SOURCES
   runtime/main.c runtime/core.c runtime/mem.c runtime/bios.c runtime/timers.c
   runtime/gpu.c runtime/gte.c runtime/spu.c runtime/cdrom.c runtime/mdec.c runtime/sio.c
-  runtime/render_gl.c runtime/pgxp.c runtime/hooks.c)
+  runtime/render_gpu.c runtime/pgxp.c runtime/hooks.c)
 
 # Recompiled game code: large, machine-generated functions.
 add_library(game_code STATIC ${GENERATED_SOURCES})

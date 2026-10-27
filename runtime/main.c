@@ -242,16 +242,34 @@ static void handle_events(void) {
 extern int frame_interval_override;
 
 // ----------------------------------------------------------------- frames
-static void present(void) {
+static int presents_per_vblank = 1;   // >1 on high-refresh displays
+static int presents_override;
+
+static void present(float alpha) {
     DisplayInfo d;
     gpu_display_info(&d);
     if (!render_cfg.hw || d.rgb24) {
         int w, h, stride;
         gpu_display(frame_rgba, &w, &h, &stride);
-        render_present(&d, frame_rgba);
+        render_present(&d, frame_rgba, 1.0f);
     } else {
-        render_present(&d, NULL);
+        render_present(&d, NULL, alpha);
     }
+}
+
+// Shows this vblank's images. A game frame lasting `interval` vblanks is shown as
+// interval * presents_per_vblank images, the in-between ones interpolated.
+static void present_vblank(void) {
+    int interval = render_frame_interval(), k = render_vblanks_since_flip();
+    int n = presents_per_vblank;
+    for (int p = 0; p < n; p++) {
+        float alpha = 1.0f;
+        if (render_cfg.interpolate && interval >= 2 && interval <= 4)
+            alpha = (float)(k * n + p + 1) / (float)(interval * n);
+        present(alpha > 1.0f ? 1.0f : alpha);
+        if (p + 1 < n && !vsync_paces && !opts.turbo) SDL_DelayPrecise(1000000000ull * 1001 / 60000 / (uint64_t)n);
+    }
+    render_vblank();
 }
 
 static FILE *wav_out;
@@ -303,7 +321,8 @@ void host_frame(void) {
     static uint64_t fps_t0;
     frame_count++;
     handle_events();
-    if (!fast_forward || (frame_count % 8) == 0) present();
+    if (!fast_forward || (frame_count % 8) == 0) present_vblank();
+    else render_vblank();
     push_audio();
     if (opts.shot_every && frame_count % opts.shot_every == 0) save_screenshot();
     if (opts.exit_after && frame_count >= opts.exit_after) {
@@ -464,6 +483,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--script") && i + 1 < argc) opts.script = argv[++i];
         else if (!strcmp(argv[i], "--turbo")) opts.turbo = true;
         else if (!strcmp(argv[i], "--save-dir") && i + 1 < argc) i++;
+        else if (!strcmp(argv[i], "--presents") && i + 1 < argc) presents_override = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(); return 0; }
         else if (argv[i][0] != '-') opts.cue = argv[i];
         else { usage(); return 1; }
@@ -499,9 +519,13 @@ int main(int argc, char **argv) {
     if (opts.turbo) vsync = false;
     SDL_GL_SetSwapInterval(vsync ? 1 : 0);
     const SDL_DisplayMode *dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
-    vsync_paces = vsync && dm && dm->refresh_rate > 58.5f && dm->refresh_rate < 61.5f;
-    LOG("[host] display %.2f Hz, %s\n", dm ? dm->refresh_rate : 0.0f,
-        vsync_paces ? "vsync paces emulation" : "timer paces emulation");
+    float hz = dm ? dm->refresh_rate : 60.0f;
+    if (vsync && hz >= 89.0f) presents_per_vblank = (int)(hz / 59.94f + 0.5f) > 4 ? 4 : (int)(hz / 59.94f + 0.5f);
+    if (presents_override > 0) presents_per_vblank = presents_override > 4 ? 4 : presents_override;
+    float target = 59.94f * presents_per_vblank;
+    vsync_paces = vsync && hz > target - 2.0f && hz < target + 2.0f;
+    LOG("[host] display %.2f Hz, %d image%s per vblank, %s\n", hz, presents_per_vblank,
+        presents_per_vblank > 1 ? "s" : "", vsync_paces ? "vsync paces emulation" : "timer paces emulation");
     SDL_AudioSpec spec = {SDL_AUDIO_S16, 2, 44100};
     audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
     if (audio) SDL_ResumeAudioStreamDevice(audio);

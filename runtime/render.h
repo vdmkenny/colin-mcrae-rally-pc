@@ -42,7 +42,11 @@ extern RenderConfig render_cfg;
 extern bool widescreen_active;   // widescreen applies to the current frames (3D gameplay)
 
 bool render_init(SDL_Window *window);
-void render_present(const DisplayInfo *d, const uint32_t *rgba_1x);
+// alpha: how far into the current game frame this display refresh is (1 = the frame itself)
+void render_present(const DisplayInfo *d, const uint32_t *rgba_1x, float alpha);
+int render_frame_interval(void);       // vblanks the last game frame lasted
+int render_vblanks_since_flip(void);
+void render_vblank(void);
 bool render_read_display(const DisplayInfo *d, uint32_t **out, int *w, int *h);
 int render_scale(void);
 

@@ -664,11 +664,13 @@ static void copy_target(GLuint from, GLuint to) {
 #define GRID_H 32
 static float grid_dx[GRID_H][GRID_W], grid_dy[GRID_H][GRID_W];
 static int grid_n[GRID_H][GRID_W];
+// dx/dy: offset from the current position back to the previous frame's; w: previous depth
 typedef struct { float dx, dy, w; uint8_t state; } VMotion;   // 0 none, 1 matched, 2 estimated
 static VMotion *motion;
 static int motion_cap;
+static bool motion_valid;   // prev_ops (the frame on screen) has a motion field
 
-static void compute_motion(float alpha) {
+static void compute_motion(void) {
     map_gen++;
     for (int i = 0; i < prev_ops.n; i++) {
         Op *o = &prev_ops.ops[i];
@@ -698,9 +700,9 @@ static void compute_motion(float alpha) {
             float dx = cx - px, dy = cy - py;
             if (dx * dx + dy * dy > 64.0f * 64.0f) continue;   // probably a different vertex
             interp_stat_matched++;
-            m->dx = -dx * (1.0f - alpha);
-            m->dy = -dy * (1.0f - alpha);
-            m->w = (v->w != 1.0f && pw != 1.0f) ? pw + (v->w - pw) * alpha : v->w;
+            m->dx = -dx;
+            m->dy = -dy;
+            m->w = (v->w != 1.0f && pw != 1.0f) ? pw : v->w;
             m->state = 1;
             int gx = (int)cx >> 4, gy = (int)cy >> 4;
             if (gx >= 0 && gx < GRID_W && gy >= 0 && gy < GRID_H) {
@@ -730,8 +732,11 @@ static void compute_motion(float alpha) {
     }
 }
 
-// Renders a recorded frame into `target`, optionally displaced by the motion field.
-static void render_ops(OpList *l, bool moved, GLuint target) {
+// Renders a recorded frame into `target`. With alpha < 1 vertices are moved back along the
+// motion field: alpha 0 is the previous frame's geometry, 1 the frame as recorded.
+static void render_ops(OpList *l, float alpha, GLuint target) {
+    bool moved = alpha < 1.0f;
+    float back = 1.0f - alpha;
     int ax1 = pending.x1, ay1 = pending.y1, ax2 = pending.x2, ay2 = pending.y2;
     target_fbo = target;
     for (int i = 0; i < l->n; i++) {
@@ -746,8 +751,9 @@ static void render_ops(OpList *l, bool moved, GLuint target) {
                 for (int k = 0; k < 3; k++) {
                     VMotion *m = &motion[i * 3 + k];
                     if (!m->state) continue;
-                    v[k].x += m->dx; v[k].y += m->dy; v[k].w = m->w;
-                    sx += m->dx; sy += m->dy; nm++;
+                    v[k].x += m->dx * back; v[k].y += m->dy * back;
+                    if (v[k].w != 1.0f && m->w != 1.0f) v[k].w = m->w + (v[k].w - m->w) * alpha;
+                    sx += m->dx * back; sy += m->dy * back; nm++;
                 }
                 if (nm && nm < 3)
                     for (int k = 0; k < 3; k++)
@@ -778,10 +784,11 @@ static void render_pending(void) {
     if (!frame_ops.n) return;
     resolve_frame(&frame_ops);
     widescreen_frame(&frame_ops);
-    render_ops(&frame_ops, false, fbo_hi);
+    render_ops(&frame_ops, 1.0f, fbo_hi);
     clear_ops(&frame_ops);
     clear_ops(&prev_ops);
     frame_has_keys = false;
+    motion_valid = false;
 }
 
 void hw_flip(void) {
@@ -791,13 +798,9 @@ void hw_flip(void) {
     resolve_frame(&frame_ops);
     widescreen_frame(&frame_ops);
     update_widescreen();
-    render_ops(&frame_ops, false, fbo_hi);
-    if (render_cfg.interpolate && last_interval == 2 && frame_has_keys && prev_ops.n) {
-        compute_motion(0.5f);
-        copy_target(fbo_hi, fbo_interp);   // anything left uncovered shows nearly identical pixels
-        render_ops(&frame_ops, true, fbo_interp);
-        interp_pending = true;
-    }
+    render_ops(&frame_ops, 1.0f, fbo_hi);
+    motion_valid = render_cfg.interpolate && last_interval >= 2 && last_interval <= 4 && frame_has_keys && prev_ops.n;
+    if (motion_valid) compute_motion();
     clear_ops(&prev_ops);
     OpList t = prev_ops;
     prev_ops = frame_ops;
@@ -937,7 +940,11 @@ static void viewport(int *x, int *y, int *w, int *h) {
     *x = (ww - vw) / 2; *y = (wh - vh) / 2; *w = vw; *h = vh;
 }
 
-void render_present(const DisplayInfo *d, const uint32_t *rgba_1x) {
+int render_frame_interval(void) { return last_interval; }
+int render_vblanks_since_flip(void) { return vblanks_since_flip; }
+void render_vblank(void) { vblanks_since_flip++; }
+
+void render_present(const DisplayInfo *d, const uint32_t *rgba_1x, float alpha) {
     // Double-buffered games flip every frame; anything that draws without flipping
     // (loading screens, single-buffered menus) is shown after a short wait.
     if (render_cfg.hw && (vblanks_since_flip >= 4 || frame_ops.n > 200000)) render_pending();
@@ -953,12 +960,18 @@ void render_present(const DisplayInfo *d, const uint32_t *rgba_1x) {
         GLF(glTexSubImage2D)(GL_TEXTURE_2D, 0, 0, 0, d->w, d->h, GL_RGBA, GL_UNSIGNED_BYTE, rgba_1x);
         draw_present(tex_disp, 0, 0, d->w / 640.0f, d->h / 512.0f, false, vx, vy, vw, vh);
     } else {
+        // In-between frame: the frame on screen, moved part of the way back to the previous one
+        // (anything the replay leaves uncovered shows the finished frame underneath).
+        interp_pending = motion_valid && alpha < 1.0f;
+        if (interp_pending) {
+            copy_target(fbo_hi, fbo_interp);
+            render_ops(&prev_ops, alpha, fbo_interp);
+        }
         GLuint src = interp_pending ? tex_interp : tex_hi;
         draw_present(src, d->x / 1024.0f, d->y / 512.0f, d->w / 1024.0f, d->h / 512.0f, false, vx, vy, vw, vh);
     }
     presented_interp = interp_pending;
     interp_pending = false;
-    vblanks_since_flip++;
     SDL_GL_SwapWindow(win);
     int s = wanted_scale();
     if (s != scale && render_cfg.hw) {

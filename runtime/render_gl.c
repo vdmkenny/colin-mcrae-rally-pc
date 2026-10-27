@@ -8,6 +8,7 @@
 #include "pgxp.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_opengl.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
 
@@ -575,43 +576,64 @@ static void resolve_frame(OpList *l) {
 
 // Widescreen: the GTE already widened the 3D projection; 2D elements keep their 4:3
 // proportions instead of being stretched, each anchored to the left edge, centre or right edge
-// by which third of the screen it is in. Sprites placed in 3D (dust, smoke) keep their place
-// and are narrowed. Decided per GPU primitive, after the vertex resolution above.
+// by which third of the screen it is in. A line of text is one element: consecutive 2D
+// primitives of similar height side by side on the same line move as a group. Sprites
+// placed in 3D (dust, smoke) keep their place and are narrowed. Decided after the vertex
+// resolution above.
+static void squeeze_ops(OpList *l, int i, int j, float anchor) {
+    for (int t = i; t < j; t++)
+        if (l->ops[t].type == OP_TRI)
+            for (int k = 0; k < 3; k++) l->ops[t].v[k].x = anchor + (l->ops[t].v[k].x - anchor) * 0.75f;
+}
+
 static void widescreen_frame(OpList *l) {
     frame_precise_vertices = 0;
     for (int i = 0; i < l->n; i++)
         if (l->ops[i].type == OP_TRI)
             for (int k = 0; k < 3; k++) frame_precise_vertices += l->ops[i].v[k].key != 0;
     if (!widescreen_active) return;
-    for (int i = 0; i < l->n;) {
-        Op *o = &l->ops[i];
-        if (o->type != OP_TRI) { i++; continue; }
-        int j = i;
-        bool is2d = o->p.kind == PRIM_2D, any3d = false;
-        float minx = 1e9f, maxx = -1e9f;
-        while (j < l->n && l->ops[j].type == OP_TRI && l->ops[j].p.id == o->p.id) {
-            for (int k = 0; k < 3; k++) {
-                HwVertex *v = &l->ops[j].v[k];
-                if (v->x < minx) minx = v->x;
-                if (v->x > maxx) maxx = v->x;
-                if (o->p.kind == PRIM_POLY && v->precise) any3d = true;
+    int gi = -1, gj = 0;   // open group of 2D primitives: ops [gi, gj)
+    float gx1 = 0, gx2 = 0;
+    float px1 = 0, px2 = 0, py1 = 0, py2 = 0;   // the group's last primitive
+    const Op *ga = NULL;
+    for (int i = 0; i <= l->n;) {
+        Op *o = i < l->n ? &l->ops[i] : NULL;
+        int j = i + 1;
+        bool is2d = false;
+        float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
+        if (o && o->type == OP_TRI) {
+            bool any3d = false;
+            for (j = i; j < l->n && l->ops[j].type == OP_TRI && l->ops[j].p.id == o->p.id; j++)
+                for (int k = 0; k < 3; k++) {
+                    HwVertex *v = &l->ops[j].v[k];
+                    minx = fminf(minx, v->x); maxx = fmaxf(maxx, v->x);
+                    miny = fminf(miny, v->y); maxy = fmaxf(maxy, v->y);
+                    if (o->p.kind == PRIM_POLY && v->precise) any3d = true;
+                }
+            is2d = o->p.kind == PRIM_2D || (o->p.kind == PRIM_POLY && !any3d);
+        }
+        if (gi >= 0) {
+            float hp = py2 - py1, hn = maxy - miny, h = fminf(hp, hn);
+            bool joins = is2d && o->a[0] == ga->a[0] && o->a[2] == ga->a[2] && h >= 4 && fmaxf(hp, hn) <= 2 * h &&
+                         miny < py2 && maxy > py1 && minx <= px2 + h && maxx >= px1 - h;
+            if (joins) {
+                gj = j;
+                gx1 = fminf(gx1, minx); gx2 = fmaxf(gx2, maxx);
+                px1 = minx; px2 = maxx; py1 = miny; py2 = maxy;
+                i = j;
+                continue;
             }
-            j++;
+            float x1 = (float)ga->a[0], w = (float)(ga->a[2] - ga->a[0] + 1);
+            float c = (gx1 + gx2) * 0.5f - x1;
+            squeeze_ops(l, gi, gj, c < w / 3 ? x1 : c > w * 2 / 3 ? x1 + w : x1 + w * 0.5f);
+            gi = -1;
         }
-        if (o->p.kind == PRIM_POLY && !any3d) is2d = true;
-        float x1 = (float)o->a[0], w = (float)(o->a[2] - o->a[0] + 1);
-        float anchor, factor = 0.75f;
         if (is2d) {
-            float c = (minx + maxx) * 0.5f - x1;
-            anchor = c < w / 3 ? x1 : c > w * 2 / 3 ? x1 + w : x1 + w * 0.5f;
-        } else if (o->p.kind == PRIM_SPRITE_3D) {
-            anchor = (minx + maxx) * 0.5f;
-        } else {
-            i = j;
-            continue;
+            gi = i; gj = j; ga = o;
+            gx1 = px1 = minx; gx2 = px2 = maxx; py1 = miny; py2 = maxy;
+        } else if (o && o->type == OP_TRI && o->p.kind == PRIM_SPRITE_3D) {
+            squeeze_ops(l, i, j, (minx + maxx) * 0.5f);
         }
-        for (int t = i; t < j; t++)
-            for (int k = 0; k < 3; k++) l->ops[t].v[k].x = anchor + (l->ops[t].v[k].x - anchor) * factor;
         i = j;
     }
 }

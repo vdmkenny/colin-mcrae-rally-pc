@@ -357,6 +357,10 @@ void host_frame(void) {
     push_audio();
     if (opts.shot_every && frame_count % opts.shot_every == 0) save_screenshot();
     if (opts.exit_after && frame_count >= opts.exit_after) {
+        if (getenv("CMR_DUMP_RAM")) {
+            FILE *f = fopen(getenv("CMR_DUMP_RAM"), "wb");
+            if (f) { fwrite(psx_ram, 1, sizeof psx_ram, f); fclose(f); }
+        }
         if (log_level >= 1) trace_dump();
 #ifdef RECOMP_TRACE
         extern void gte_profile_dump(void);
@@ -375,7 +379,36 @@ void host_frame(void) {
     if (!opts.turbo) pace();
 }
 
+// Debug aid: CMR_WATCH=addr[,addr...] logs when RAM words change (checked every vblank).
+static void watch_ram(void) {
+    static uint32_t addrs[16], vals[16];
+    static int n = -1;
+    if (n < 0) {
+        n = 0;
+        const char *e = getenv("CMR_WATCH");
+        while (e && *e && n < 16) {
+            addrs[n] = (uint32_t)strtoul(e, (char **)&e, 16) & 0x1FFFFC;
+            memcpy(&vals[n], psx_ram + addrs[n], 4);
+            n++;
+            if (*e == ',') e++;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        uint32_t v;
+        memcpy(&v, psx_ram + addrs[i], 4);
+        if (v != vals[i]) LOG("[watch] frame %d: %06x %08x -> %08x\n", frame_count, addrs[i], vals[i], v);
+        vals[i] = v;
+    }
+}
+
 static void vblank_event(void) {
+    watch_ram();
+    static int watching = -1;
+    if (watching < 0) watching = getenv("CMR_WATCH") != NULL;
+    if (watching) {
+        static uint32_t last_gp;
+        if (cpu.r[28] != last_gp) { LOG("[watch] frame %d: gp = %08x\n", frame_count, cpu.r[28]); last_gp = cpu.r[28]; }
+    }
     next_vblank += CYCLES_PER_FRAME;
     sched_at(EV_VBLANK, next_vblank, vblank_event);
     irq_raise(IRQ_VBLANK);

@@ -2,6 +2,7 @@
 #include "psx.h"
 #include "pgxp.h"
 #include "render.h"
+#include <stdlib.h>
 
 static int16_t V[3][3];          // vectors 0-2 (x,y,z)
 static uint8_t RGBC[4];
@@ -24,7 +25,16 @@ static uint32_t FLAG;
 
 static uint8_t unr_table[257];
 
+// Debug aids, read once: CMR_DUMP_GTE=<frame> logs the first use of each command (and the
+// lighting registers at the first NCCT) from that frame on; CMR_TRACE_LIGHT logs writes to
+// the light colour matrix and ambient colour.
+static long dump_gte_from = -1;
+static bool trace_light;
+
 void gte_init(void) {
+    const char *e = getenv("CMR_DUMP_GTE");
+    dump_gte_from = e ? atol(e) : -1;
+    trace_light = getenv("CMR_TRACE_LIGHT") != NULL;
     for (int i = 0; i < 257; i++) {
         int v = (0x40000 / (i + 0x100) + 1) / 2 - 0x101;
         unr_table[i] = v > 0 ? (uint8_t)v : 0;
@@ -148,6 +158,14 @@ uint32_t gte_read_ctrl(int r) {
 }
 
 void gte_write_ctrl(int r, uint32_t v) {
+#ifdef RECOMP_TRACE
+    if (trace_light && r >= 13 && r <= 20) {
+        extern uint32_t trace_stack[1024];
+        extern int trace_depth;
+        LOG("[gte] ctrl %d = %08x @frame %llu in %08x <- %08x\n", r, v, (unsigned long long)(cpu.cycles / CYCLES_PER_FRAME),
+            trace_depth > 0 ? trace_stack[trace_depth - 1] : 0, trace_depth > 1 ? trace_stack[trace_depth - 2] : 0);
+    }
+#endif
     switch (r) {
     case 0: case 1: case 2: case 3: case 4: mat_write(RT, r, v); break;
     case 5: case 6: case 7: TR[r - 5] = (int32_t)v; break;
@@ -377,6 +395,15 @@ void gte_profile_dump(void) {
 #endif
 
 void gte_command(uint32_t op) {
+    if (dump_gte_from >= 0 && cpu.cycles / CYCLES_PER_FRAME >= (uint64_t)dump_gte_from) {
+        static uint64_t seen;
+        if (!(seen & (1ull << (op & 0x3F)))) {
+            seen |= 1ull << (op & 0x3F);
+            LOG("[gte] cmd %02x op=%07x IR0=%d IR=%d,%d,%d FC=%d,%d,%d DQA=%d DQB=%d H=%u RGBC=%02x%02x%02x MAC=%d,%d,%d\n",
+                op & 0x3F, op, IR[0], IR[1], IR[2], IR[3], FC[0], FC[1], FC[2], DQA, DQB, H, RGBC[0], RGBC[1], RGBC[2],
+                MAC[1], MAC[2], MAC[3]);
+        }
+    }
     FLAG = 0;
 #ifdef RECOMP_TRACE
     if (log_level >= 3 && ((op & 0x3F) == 0x01 || (op & 0x3F) == 0x30) && trace_depth > 0 && trace_depth <= 1024) {
@@ -450,7 +477,18 @@ void gte_command(uint32_t op) {
         break;
     }
     case 0x1B: cmd_ncc(0); break;   // NCCS
-    case 0x3F: cmd_ncc(0); cmd_ncc(1); cmd_ncc(2); break;   // NCCT
+    case 0x3F: {   // NCCT
+        static int dumped;
+        if (dump_gte_from >= 0 && !dumped && cpu.cycles / CYCLES_PER_FRAME >= (uint64_t)dump_gte_from) {
+            dumped = 1;
+            LOG("[gte] NCCT op=%07x LLM=%d,%d,%d/%d,%d,%d/%d,%d,%d LCM=%d,%d,%d/%d,%d,%d/%d,%d,%d BK=%d,%d,%d RGBC=%02x%02x%02x V0=%d,%d,%d\n",
+                op, LLM[0][0], LLM[0][1], LLM[0][2], LLM[1][0], LLM[1][1], LLM[1][2], LLM[2][0], LLM[2][1], LLM[2][2],
+                LCM[0][0], LCM[0][1], LCM[0][2], LCM[1][0], LCM[1][1], LCM[1][2], LCM[2][0], LCM[2][1], LCM[2][2],
+                BK[0], BK[1], BK[2], RGBC[0], RGBC[1], RGBC[2], V[0][0], V[0][1], V[0][2]);
+        }
+        cmd_ncc(0); cmd_ncc(1); cmd_ncc(2);
+        break;
+    }
     case 0x1C: {   // CC
         int16_t ir[3] = {IR[1], IR[2], IR[3]};
         mvmva_mul(LCM, ir, BK);

@@ -191,6 +191,9 @@ void dispatch_call(CPU *c, uint32_t addr) {
 void dispatch_jump(CPU *c, uint32_t addr) { dispatch_call(c, addr); }
 
 // ---------------------------------------------------------------- execution
+#ifdef RECOMP_TRACE
+extern int trace_depth;
+#endif
 static jmp_buf exec_jb;
 static uint32_t exec_entry, exec_sp, exec_gp, exec_a0, exec_a1;
 
@@ -202,6 +205,9 @@ void psx_exec(uint32_t entry, uint32_t sp, uint32_t gp, uint32_t a0, uint32_t a1
 void psx_start(uint32_t entry, uint32_t sp, uint32_t gp) {
     exec_entry = entry; exec_sp = sp; exec_gp = gp; exec_a0 = 1; exec_a1 = 0;
     setjmp(exec_jb);
+#ifdef RECOMP_TRACE
+    trace_depth = 0;   // the host stack was unwound by the switch to a new executable
+#endif
     if (!module_activate(exec_entry))
         host_fatal("no recompiled module matches the executable at %08x", exec_entry);
     CPU *c = &cpu;

@@ -123,6 +123,13 @@ frontend; Rally School; memory card save and load. The game logic runs at its or
 occasionally culls scenery just outside its original 4:3 view.
 
 Development aids: `--log N`, `--turbo`, `--exit-after N`, `--shot-every N --shot-dir D`,
-`--script "from-to:buttons[:twist[:throttle]];..."`, `--wav file.wav`, `--save-dir D`,
-`CMR_DUMP_PRIMS=<frame>` (raw GPU commands), and the recent-function trace and shadow call
-stack printed on fatal errors.
+`--script "from-to:buttons[:twist[:throttle]];..."`, `--wav file.wav`, `--save-dir D`, the
+recent-function trace and shadow call stack printed on fatal errors, and environment
+variables: `CMR_DUMP_PRIMS=<frame>` (raw GPU commands), `CMR_DUMP_GTE=<frame>` (GTE command
+use and lighting registers), `CMR_TRACE_LIGHT=1` (light matrix/ambient writes with callers),
+`CMR_WATCH=addr,...` (log RAM word changes per vblank), `CMR_DUMP_RAM=file` (RAM at exit).
+
+Open question: night stages (e.g. the attract-mode demo on Sweden stage 2, which the game's
+own tables mark as a night stage) render with black near-track geometry. The game selects a
+"dark" lighting setup there on purpose; whether the result matches real hardware has not
+been verified yet.

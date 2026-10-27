@@ -668,9 +668,11 @@ void gpu_gp1(uint32_t v) {
     case 0x05:
         if ((v & 0x3FE) != disp_x || ((v >> 10) & 0x1FF) != disp_y) {
             gpu_stat_flips++;
-            if (getenv("CMR_DUMP_PRIMS")) {
-                int f = (int)(cpu.cycles / CYCLES_PER_FRAME), want = atoi(getenv("CMR_DUMP_PRIMS"));
-                gpu_dump_now = f >= want && f < want + 2;
+            {
+                static long want = -2;
+                if (want == -2) want = getenv("CMR_DUMP_PRIMS") ? atol(getenv("CMR_DUMP_PRIMS")) : -1;
+                long f = (long)(cpu.cycles / CYCLES_PER_FRAME);
+                gpu_dump_now = want >= 0 && f >= want && f < want + 2;
             }
             hw_flip();
             pgxp_new_frame();

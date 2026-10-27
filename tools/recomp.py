@@ -6,7 +6,10 @@ Each discovered function becomes `void <mod>_<addr>(CPU *c)`. jal becomes a C ca
 tables become switch statements. Hardware, BIOS and GTE access go through the
 runtime (see runtime/cpu.h).
 
-Usage: recomp.py <bins dir> <ghidra out dir> <output dir>
+Usage: recomp.py <bins dir> <output dir> [ghidra out dir]
+
+Function starts come from tools/functions/<module>.txt (exported from a Ghidra
+analysis), or from <ghidra out dir>/<module>.funcs.txt when given.
 """
 import collections
 import os
@@ -625,13 +628,16 @@ def generate(m, outdir):
 
 
 def main():
-    bins, gdir, outdir = sys.argv[1], sys.argv[2], sys.argv[3]
+    bins, outdir = sys.argv[1], sys.argv[2]
+    tools_dir = os.path.dirname(os.path.abspath(__file__))
+    gdir = sys.argv[3] if len(sys.argv) > 3 else None
     extra_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entries")
     hooks = load_hooks(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks.txt"))
     sources = []
     for name, fn, base, entry in MODULES:
         m = Module(name, os.path.join(bins, fn), base, entry,
-                   load_ghidra(os.path.join(gdir, f"{name}.funcs.txt")),
+                   load_ghidra(os.path.join(gdir, f"{name}.funcs.txt") if gdir
+                               else os.path.join(tools_dir, "functions", f"{name}.txt")),
                    load_extra(os.path.join(extra_dir, f"{name}.txt")))
         m.discover()
         m.hooks = hooks.get(name, {})

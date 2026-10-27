@@ -282,14 +282,72 @@ static void vblank_event(void) {
 }
 
 // ------------------------------------------------------------------- setup
+static bool read_line(const char *file, char *out, size_t n) {
+    FILE *f = fopen(file, "r");
+    if (!f) return false;
+    bool ok = fgets(out, (int)n, f) != NULL;
+    fclose(f);
+    if (ok) out[strcspn(out, "\r\n")] = 0;
+    return ok && out[0];
+}
+
+// The disc image: command line, then disc_path.txt written by tools/build_game.py.
 static const char *find_cue(void) {
     static char path[1024];
-    const char *candidates[] = {"game/disc/Colin McRae Rally.cue", "Colin McRae Rally.cue", "disc/Colin McRae Rally.cue"};
-    for (size_t i = 0; i < sizeof candidates / sizeof candidates[0]; i++) {
-        FILE *f = fopen(candidates[i], "r");
-        if (f) { fclose(f); snprintf(path, sizeof path, "%s", candidates[i]); return path; }
+    char file[1100];
+    const char *base = SDL_GetBasePath();
+    if (base) {
+        snprintf(file, sizeof file, "%sdisc_path.txt", base);
+        if (read_line(file, path, sizeof path)) return path;
     }
+    if (read_line("disc_path.txt", path, sizeof path)) return path;
     return NULL;
+}
+
+// ----------------------------------------------------------------- settings
+static char settings_path[1100];
+
+static void apply_setting(const char *k, const char *v) {
+    int n = atoi(v);
+    if (!strcmp(k, "fullscreen")) opts.fullscreen = n;
+    else if (!strcmp(k, "window")) opts.scale = n > 0 ? n : 3;
+    else if (!strcmp(k, "scale")) render_cfg.scale = n;
+    else if (!strcmp(k, "hires")) render_cfg.hw = n;
+    else if (!strcmp(k, "filter")) render_cfg.filter = n;
+    else if (!strcmp(k, "widescreen")) render_cfg.widescreen = n;
+    else if (!strcmp(k, "pgxp")) pgxp_enabled = n;
+    else if (!strcmp(k, "vsync")) vsync = n;
+    else if (!strcmp(k, "dither")) gpu_dither_enabled = n;
+    else if (!strcmp(k, "analog")) pad_analog_mode = n;
+    else if (!strcmp(k, "cpu")) cycles_per_insn = n > 0 ? (uint32_t)n : 2;
+}
+
+static void load_settings(void) {
+    FILE *f = fopen(settings_path, "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        char *eq = strchr(line, '=');
+        if (line[0] == '#' || !eq) continue;
+        *eq = 0;
+        char *k = line, *v = eq + 1;
+        while (*k == ' ') k++;
+        for (char *e = k + strlen(k); e > k && e[-1] == ' '; ) *--e = 0;
+        v[strcspn(v, "\r\n")] = 0;
+        apply_setting(k, v);
+    }
+    fclose(f);
+}
+
+static void save_settings(void) {
+    FILE *f = fopen(settings_path, "w");
+    if (!f) return;
+    fprintf(f, "# Colin McRae Rally PC settings (also changeable with hotkeys and command-line options)\n");
+    fprintf(f, "fullscreen = %d\nwindow = %d\nscale = %d\nhires = %d\nfilter = %d\nwidescreen = %d\n",
+            opts.fullscreen, opts.scale, render_cfg.scale, render_cfg.hw, render_cfg.filter, render_cfg.widescreen);
+    fprintf(f, "pgxp = %d\nvsync = %d\ndither = %d\nanalog = %d\ncpu = %u\n", pgxp_enabled, vsync,
+            gpu_dither_enabled, pad_analog_mode, cycles_per_insn);
+    fclose(f);
 }
 
 static void usage(void) {
@@ -312,6 +370,11 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
+    char *pref = SDL_GetPrefPath("cmrally", "Colin McRae Rally");
+    if (pref) { snprintf(save_dir, sizeof save_dir, "%s", pref); SDL_free(pref); }
+    snprintf(settings_path, sizeof settings_path, "%scmrally.ini", save_dir);
+    load_settings();
+    bool testing = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--fullscreen")) opts.fullscreen = true;
         else if (!strcmp(argv[i], "--window") && i + 1 < argc) opts.scale = atoi(argv[++i]);
@@ -341,12 +404,14 @@ int main(int argc, char **argv) {
     }
     if (!opts.cue) opts.cue = find_cue();
     if (!opts.cue || !cdrom_open(opts.cue)) {
-        fprintf(stderr, "Cannot open the game disc. Pass the path to your Colin McRae Rally .cue file.\n");
+        fprintf(stderr, "Cannot open the game disc. Build with tools/build_game.py or pass the path to your\n"
+                        "Colin McRae Rally .cue file.\n");
         usage();
         return 1;
     }
-    char *pref = SDL_GetPrefPath("cmrally", "Colin McRae Rally");
-    if (pref) { snprintf(save_dir, sizeof save_dir, "%s", pref); SDL_free(pref); }
+    // Hotkey changes persist; test runs (scripted/turbo) leave the settings alone.
+    testing = opts.turbo || opts.script || opts.exit_after;
+    if (!testing) atexit(save_settings);
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());

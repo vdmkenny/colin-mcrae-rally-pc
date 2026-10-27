@@ -258,6 +258,9 @@ static GLuint target_fbo;                 // where drawing goes (fbo_hi, or fbo_
 static int scale = 1;
 static bool vram_dirty = true;
 
+bool widescreen_active;
+static int frame_precise_vertices;
+
 RenderConfig render_cfg = {.hw = true, .filter = false, .widescreen = false, .scale = 0, .interpolate = true};
 
 // current batch state
@@ -570,6 +573,49 @@ static void resolve_frame(OpList *l) {
     }
 }
 
+// Widescreen: the GTE already widened the 3D projection; 2D elements keep their 4:3
+// proportions instead of being stretched, each anchored to the left edge, centre or right edge
+// by which third of the screen it is in. Sprites placed in 3D (dust, smoke) keep their place
+// and are narrowed. Decided per GPU primitive, after the vertex resolution above.
+static void widescreen_frame(OpList *l) {
+    frame_precise_vertices = 0;
+    for (int i = 0; i < l->n; i++)
+        if (l->ops[i].type == OP_TRI)
+            for (int k = 0; k < 3; k++) frame_precise_vertices += l->ops[i].v[k].key != 0;
+    if (!widescreen_active) return;
+    for (int i = 0; i < l->n;) {
+        Op *o = &l->ops[i];
+        if (o->type != OP_TRI) { i++; continue; }
+        int j = i;
+        bool is2d = o->p.kind == PRIM_2D, any3d = false;
+        float minx = 1e9f, maxx = -1e9f;
+        while (j < l->n && l->ops[j].type == OP_TRI && l->ops[j].p.id == o->p.id) {
+            for (int k = 0; k < 3; k++) {
+                HwVertex *v = &l->ops[j].v[k];
+                if (v->x < minx) minx = v->x;
+                if (v->x > maxx) maxx = v->x;
+                if (o->p.kind == PRIM_POLY && v->precise) any3d = true;
+            }
+            j++;
+        }
+        if (o->p.kind == PRIM_POLY && !any3d) is2d = true;
+        float x1 = (float)o->a[0], w = (float)(o->a[2] - o->a[0] + 1);
+        float anchor, factor = 0.75f;
+        if (is2d) {
+            float c = (minx + maxx) * 0.5f - x1;
+            anchor = c < w / 3 ? x1 : c > w * 2 / 3 ? x1 + w : x1 + w * 0.5f;
+        } else if (o->p.kind == PRIM_SPRITE_3D) {
+            anchor = (minx + maxx) * 0.5f;
+        } else {
+            i = j;
+            continue;
+        }
+        for (int t = i; t < j; t++)
+            for (int k = 0; k < 3; k++) l->ops[t].v[k].x = anchor + (l->ops[t].v[k].x - anchor) * factor;
+        i = j;
+    }
+}
+
 // ----------------------------------------------------------- interpolation
 #define MAP_SLOTS 65536
 static struct { uint32_t key; float x, y, w; } vmap[MAP_SLOTS];
@@ -722,9 +768,16 @@ static void render_ops(OpList *l, bool moved, GLuint target) {
 }
 
 // Renders whatever has been recorded so far as a normal (not interpolated) frame.
+static void update_widescreen(void) {
+    const Module *m = module_active();
+    bool gameplay = m && (!strcmp(m->name, "game") || !strcmp(m->name, "rschool")) && frame_precise_vertices > 300;
+    widescreen_active = render_cfg.widescreen && render_cfg.hw && gameplay;
+}
+
 static void render_pending(void) {
     if (!frame_ops.n) return;
     resolve_frame(&frame_ops);
+    widescreen_frame(&frame_ops);
     render_ops(&frame_ops, false, fbo_hi);
     clear_ops(&frame_ops);
     clear_ops(&prev_ops);
@@ -736,6 +789,8 @@ void hw_flip(void) {
     last_interval = vblanks_since_flip < 1 ? 1 : vblanks_since_flip;
     vblanks_since_flip = 0;
     resolve_frame(&frame_ops);
+    widescreen_frame(&frame_ops);
+    update_widescreen();
     render_ops(&frame_ops, false, fbo_hi);
     if (render_cfg.interpolate && last_interval == 2 && frame_has_keys && prev_ops.n) {
         compute_motion(0.5f);
@@ -876,7 +931,7 @@ static void draw_present(GLuint tex, float sx, float sy, float sw, float sh, boo
 static void viewport(int *x, int *y, int *w, int *h) {
     int ww, wh;
     SDL_GetWindowSizeInPixels(win, &ww, &wh);
-    float aspect = render_cfg.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;
+    float aspect = widescreen_active ? 16.0f / 9.0f : 4.0f / 3.0f;
     int vw = ww, vh = (int)(ww / aspect + 0.5f);
     if (vh > wh) { vh = wh; vw = (int)(wh * aspect + 0.5f); }
     *x = (ww - vw) / 2; *y = (wh - vh) / 2; *w = vw; *h = vh;

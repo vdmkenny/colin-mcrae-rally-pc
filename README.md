@@ -13,7 +13,8 @@ No game data is included or distributed: you build the port from your own disc i
   in true colour (up to 16x the original 320x240)
 - Sub-pixel vertex precision and perspective-correct texturing (no polygon wobble or
   texture warping), from the GTE's unrounded results
-- Optional 16:9 widescreen with a widened 3D field of view
+- Optional 16:9 widescreen in races: wider 3D field of view, HUD kept at its original
+  proportions and anchored to the screen edges; menus and videos are shown pillarboxed
 - Optional bilinear texture filtering
 - Analog steering and throttle: gamepads (anything SDL3 supports) are presented to the game
   as a Namco NeGcon, which it supports natively — stick steering, trigger throttle/brake
@@ -107,9 +108,9 @@ Settings and memory cards live in the user preferences folder
 ## Status
 
 Boots through the FMVs and menus into championship stages, pausing and quitting back to the
-frontend. The game logic runs at its original 30 Hz; races are displayed at 60 fps through
-interpolation. Widescreen shows the wider view, but the game still culls some scenery just
-outside its original 4:3 view, and the 2D HUD is stretched.
+frontend; Rally School; memory card save and load. The game logic runs at its original
+30 Hz; races are displayed at 60 fps through interpolation. In widescreen the game
+occasionally culls scenery just outside its original 4:3 view.
 
 Development aids: `--log N`, `--turbo`, `--exit-after N`, `--shot-every N --shot-dir D`,
 `--script "from-to:buttons[:twist[:throttle]];..."`, `--wav file.wav`, `--save-dir D`,

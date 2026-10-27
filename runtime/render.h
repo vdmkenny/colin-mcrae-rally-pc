@@ -14,7 +14,11 @@ typedef struct {
     bool precise;    // x/y came from the GTE (or are exact for 2D primitives)
 } HwVertex;
 
+enum { PRIM_POLY, PRIM_2D, PRIM_SPRITE_3D };
+
 typedef struct {
+    uint32_t id;                   // triangles of one GPU primitive share an id
+    uint8_t kind;                  // PRIM_POLY (2D or 3D, decided per frame), PRIM_2D, PRIM_SPRITE_3D
     bool textured, raw, semi, filterable;
     int semi_mode;
     int depth;                     // 0 = 4-bit CLUT, 1 = 8-bit CLUT, 2 = 15-bit direct
@@ -35,6 +39,7 @@ typedef struct {
     bool interpolate; // generate in-between frames when the game renders below 60 fps
 } RenderConfig;
 extern RenderConfig render_cfg;
+extern bool widescreen_active;   // widescreen applies to the current frames (3D gameplay)
 
 bool render_init(SDL_Window *window);
 void render_present(const DisplayInfo *d, const uint32_t *rgba_1x);

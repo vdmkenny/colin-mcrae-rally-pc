@@ -284,7 +284,7 @@ static void rtp(int v, bool last) {
     uint32_t div = gte_divide();
     int64_t sx = (int64_t)div * IR[1] + OFX;
     int64_t sy = (int64_t)div * IR[2] + OFY;
-    if (render_cfg.widescreen) sx = OFX + (sx - OFX) * 3 / 4;
+    if (widescreen_active) sx = OFX + (sx - OFX) * 3 / 4;
     set_mac0(sx); set_mac0(sy);
     bool ok = push_sxy(sx >> 16, sy >> 16);
     // Precise projection for the high-resolution renderer, when the hardware result was
@@ -293,7 +293,7 @@ static void rtp(int v, bool last) {
     if (ok && div_ok && sf_shift == 12 && m1 >= -0x8000 && m1 <= 0x7FFF && m2 >= -0x8000 && m2 <= 0x7FFF && z > 0) {
         double zf = (double)z / 4096.0;
         double px = (double)x / 4096.0 * H / zf, py = (double)y / 4096.0 * H / zf;
-        if (render_cfg.widescreen) px *= 0.75;
+        if (widescreen_active) px *= 0.75;
         pgxp_sxy[2][0] = (float)(OFX / 65536.0 + px);
         pgxp_sxy[2][1] = (float)(OFY / 65536.0 + py);
         pgxp_sxy[2][2] = (float)zf;

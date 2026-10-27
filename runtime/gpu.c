@@ -265,8 +265,13 @@ static void hw_tri(const Vtx *a, const Vtx *b, const Vtx *c, const HwPrim *p) {
     hw_triangle(v, p);
 }
 
+static uint32_t prim_counter;
+static bool rect_3d;   // the sprite's position word came from the GTE
+
 static HwPrim hw_prim(const TexInfo *t, bool textured, bool raw, bool semi, bool filterable) {
     HwPrim p;
+    p.id = ++prim_counter;
+    p.kind = PRIM_POLY;
     p.textured = textured; p.raw = raw; p.semi = semi; p.filterable = filterable;
     p.semi_mode = textured ? t->semi_mode : (int)((texpage >> 5) & 3);
     p.depth = t->tex_depth;
@@ -343,6 +348,7 @@ static void hw_line(Vtx a, Vtx b, bool shaded, bool semi) {
     for (int i = 0; i < 4; i++) { q[i].precise = true; q[i].key = 0; q[i].xy = 0; }
     TexInfo t = {0};
     HwPrim p = hw_prim(&t, false, false, semi, false);
+    p.kind = PRIM_2D;
     hw_tri(&q[0], &q[1], &q[2], &p);
     hw_tri(&q[1], &q[2], &q[3], &p);
 }
@@ -402,6 +408,7 @@ static void draw_rect(int x0, int y0, int w, int h, uint32_t col, int u0, int v0
         }
         HwPrim p = hw_prim(&t, textured, raw, semi, false);
         p.semi_mode = semi_mode;
+        p.kind = rect_3d ? PRIM_SPRITE_3D : PRIM_2D;
         HwVertex hv[4];
         for (int i = 0; i < 4; i++) { hv[i] = hw_vtx(&q[i], false); hv[i].u = us[i]; hv[i].v = vs[i]; }
         if (w > 0 && h > 0) {
@@ -435,6 +442,11 @@ static void cmd_rect(void) {
     bool textured = op & 4, semi = op & 2, raw = op & 1;
     int size = (op >> 3) & 3;
     int k = 1;
+    {
+        float fx, fy, fw;
+        uint32_t key;
+        rect_3d = pgxp_lookup(cmd_addr[k], cmd[k], &fx, &fy, &fw, &key);
+    }
     uint32_t xy = cmd[k++];
     int x = sext11(sext11(xy & 0x7FF) + off_x);
     int y = sext11(sext11((xy >> 16) & 0x7FF) + off_y);

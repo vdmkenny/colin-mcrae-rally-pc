@@ -2,8 +2,8 @@
 
 A native PC port of the PlayStation release of *Colin McRae Rally* (NTSC-U, SCUS-94474).
 The game's four MIPS executables are statically recompiled to C and run on a native runtime
-that replaces the PlayStation hardware and BIOS. Rendering, audio and input go through SDL3
-and OpenGL.
+that replaces the PlayStation hardware and BIOS. Rendering, audio and input go through SDL3;
+the renderer uses SDL's GPU API, which runs on Vulkan (Linux, Windows) or Metal (macOS).
 
 No game data is included or distributed: you build the port from your own disc image, and
 the recompiled code (`generated/`) is derived from it, so it is not part of this repository.
@@ -33,10 +33,12 @@ This is an unofficial fan project, not affiliated with Codemasters or Sony.
 
 ## Building
 
-Requirements: CMake 3.20+, a C11 compiler, Python 3, SDL3 (3.2 or newer) and OpenGL 3.3.
-Developed on macOS with Clang; the code avoids compiler-specific extensions outside the
-optional debug trace, so GCC (Linux) and MSVC (Windows) builds are expected to work but
-have not been tested yet.
+Requirements: CMake 3.20+, a C11 compiler, Python 3, SDL3 (3.2 or newer) and a GPU with
+Vulkan (Linux, Windows) or Metal (macOS).
+Developed on macOS with Clang. Linux builds with GCC are checked in a Debian container
+(`tools/docker/Dockerfile`), which also runs the game on Mesa's software Vulkan driver. The
+code avoids compiler-specific extensions outside the optional debug trace, so MSVC (Windows)
+builds are expected to work but have not been tested yet.
 
 ```bash
 brew install sdl3 cmake ninja      # macOS; use your package manager elsewhere
@@ -126,8 +128,13 @@ Settings and memory cards live in the user preferences folder
   filesystem, `DoExecute` switching between executables), GTE, GPU (software rasterizer
   for the authoritative 1x VRAM), SPU, CD-ROM controller (XA-ADPCM, CD-DA), MDEC, DMA,
   timers and the controller port.
-- `runtime/render_gl.c` redraws each frame at high resolution when the game flips its
-  display; `runtime/pgxp.c` carries precise vertex positions and vertex identities from the
+- `runtime/render_gpu.c` redraws each frame at high resolution when the game flips its
+  display, through SDL_GPU: a frame's vertices and texture uploads go to the GPU in one copy
+  pass and are drawn in a single render pass where possible. The shaders
+  (`runtime/shaders/`) are compiled to SPIR-V and Metal by `tools/build_shaders.py` (glslc,
+  spirv-cross) into `runtime/gpu_shaders.h`, which is committed, so building the game does
+  not need those tools. `SDL_GPU_DRIVER=vulkan` forces Vulkan where Metal is the default
+  (macOS with MoltenVK installed); `runtime/pgxp.c` carries precise vertex positions and vertex identities from the
   GTE (and from where each input vertex was loaded) to the renderer, which uses them for
   wobble-free geometry and to build interpolated frames.
 - `ghidra/` holds the headless Ghidra scripts used to produce the function lists.
@@ -137,16 +144,17 @@ Settings and memory cards live in the user preferences folder
 Boots through the FMVs and menus into championship stages, pausing and quitting back to the
 frontend; Rally School; the attract-mode demo; two-player split screen; memory card save and
 load. Verified in real time at 60 emulated fps with the high-resolution renderer and
-interpolation on an Apple Silicon Mac (120 Hz display). The game logic runs at its original 30 Hz;
+interpolation on an Apple Silicon Mac (120 Hz display, Metal), and on Linux with Vulkan (Mesa
+lavapipe in a container), with identical output and no Vulkan validation errors. The game logic runs at its original 30 Hz;
 races are shown at the display refresh rate through interpolation. A full championship has
 not been played through, so later stages and end-of-rally screens are less tested.
 
 Development aids: `--log N`, `--turbo`, `--hidden`, `--exit-after N`, `--shot-every N --shot-dir D`,
 `--script "from-to:buttons[:twist[:throttle]];..."` (`--script2` for port 2), `--wav file.wav`,
-`--save-dir D`, the
-recent-function trace and shadow call stack printed on fatal errors, and environment
-variables: `CMR_DUMP_PRIMS=<frame>` (raw GPU commands), `CMR_DUMP_GTE=<frame>` (GTE command
-use and lighting registers), `CMR_TRACE_LIGHT=1` (light matrix/ambient writes with callers),
-`CMR_WATCH=addr,...` (log RAM word changes per vblank), `CMR_POKE=frame:addr=value|@addr,...`
-(write RAM words at a frame), `CMR_DUMP_RAM=file` (RAM at exit),
-`CMR_ANALOG_AT=<frame>` (press ANALOG on port 1).
+`--save-dir D`, the recent-function trace and shadow call stack printed on fatal errors, and
+environment variables: `CMR_DUMP_PRIMS=<frame>` (raw GPU commands), `CMR_DUMP_GTE=<frame>`
+(GTE command use and lighting registers), `CMR_TRACE_LIGHT=1` (light matrix/ambient writes
+with callers), `CMR_WATCH=addr,...` (log RAM word changes per vblank),
+`CMR_POKE=frame:addr=value|@addr,...` (write RAM words at a frame), `CMR_DUMP_RAM=file` (RAM
+at exit), `CMR_ANALOG_AT=<frame>` (press ANALOG on port 1), `CMR_GPU_DEBUG=1` (SDL_GPU
+debug mode with the Vulkan validation layers when installed).

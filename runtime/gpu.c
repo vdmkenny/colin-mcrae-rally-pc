@@ -51,6 +51,8 @@ void gpu_init(void) {
 
 // ------------------------------------------------------------------ helpers
 static inline int sext11(int v) { return (int)((uint32_t)v << 21) >> 21; }
+static inline int min3(int a, int b, int c) { int m = a < b ? a : b; return m < c ? m : c; }
+static inline int max3(int a, int b, int c) { int m = a > b ? a : b; return m > c ? m : c; }
 
 static const int dither[4][4] = {
     {-4, 0, -3, 1}, {2, -2, 3, -1}, {-3, 1, -4, 0}, {3, -1, 2, -2},
@@ -143,11 +145,8 @@ static void draw_triangle(Vtx p0, Vtx p1, Vtx p2, int flags, const TexInfo *t) {
     int64_t area = (int64_t)(p1.x - p0.x) * (p2.y - p0.y) - (int64_t)(p2.x - p0.x) * (p1.y - p0.y);
     if (area == 0) return;
     if (area < 0) { Vtx tmp = p1; p1 = p2; p2 = tmp; area = -area; }
-    int minx = p0.x, maxx = p0.x, miny = p0.y, maxy = p0.y;
-    if (p1.x < minx) minx = p1.x; if (p1.x > maxx) maxx = p1.x;
-    if (p2.x < minx) minx = p2.x; if (p2.x > maxx) maxx = p2.x;
-    if (p1.y < miny) miny = p1.y; if (p1.y > maxy) maxy = p1.y;
-    if (p2.y < miny) miny = p2.y; if (p2.y > maxy) maxy = p2.y;
+    int minx = min3(p0.x, p1.x, p2.x), maxx = max3(p0.x, p1.x, p2.x);
+    int miny = min3(p0.y, p1.y, p2.y), maxy = max3(p0.y, p1.y, p2.y);
     if (maxx - minx >= 1024 || maxy - miny >= 512) return;
     if (minx < da_x1) minx = da_x1;
     if (miny < da_y1) miny = da_y1;
@@ -258,10 +257,8 @@ static void hw_tri(const Vtx *a, const Vtx *b, const Vtx *c, const HwPrim *p) {
     bool persp = p->textured;   // the renderer drops depth unless all three vertices have it
     HwVertex v[3] = {hw_vtx(a, persp), hw_vtx(b, persp), hw_vtx(c, persp)};
     // Same size limit as the hardware: oversized polygons are not drawn at all.
-    int minx = a->x < b->x ? a->x : b->x, maxx = a->x > b->x ? a->x : b->x;
-    int miny = a->y < b->y ? a->y : b->y, maxy = a->y > b->y ? a->y : b->y;
-    if (c->x < minx) minx = c->x; if (c->x > maxx) maxx = c->x;
-    if (c->y < miny) miny = c->y; if (c->y > maxy) maxy = c->y;
+    int minx = min3(a->x, b->x, c->x), maxx = max3(a->x, b->x, c->x);
+    int miny = min3(a->y, b->y, c->y), maxy = max3(a->y, b->y, c->y);
     if (maxx - minx >= 1024 || maxy - miny >= 512) return;
     hw_triangle(v, p);
 }

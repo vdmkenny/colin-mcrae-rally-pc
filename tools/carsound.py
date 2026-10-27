@@ -7,8 +7,8 @@ Usage: carsound.py <Colin McRae Rally .cue> <disc car> <out SOUNDS.BFX> [--pitch
 The engine loops are resampled to play --pitch times higher (the game plays them faster with
 engine speed and tops out near 8000 rpm, so 1.19 makes that 9500), and --whine mixes in a
 supercharger whine at that level (0.2 is clearly audible) that rises with engine speed.
---blowoff sets the volume (0-127, 0 silent) of the turbo dump valve the game plays when the
-throttle closes.
+--blowoff scales (0 silences) what the game plays when the throttle closes on a turbo car (the
+base car decides): the dump valve and the anti-lag pops.
 """
 import argparse
 import math
@@ -23,7 +23,7 @@ RATE = 44100           # what the game's pitch 0x1000 plays at
 TOP_PITCH = 0.69       # the engine loops' pitch at the top of the rev range
 WHINE_HZ = 1600        # supercharger whine at the top of the rev range
 ENGINE_PROGRAMS = (0, 1, 2, 3, 5, 6)
-BLOWOFF_PROGRAMS = (78, 81)   # played when the throttle closes
+BLOWOFF_PROGRAMS = (7, 10, 11)   # dump valve, anti-lag pops: played when the throttle closes
 FILTERS = [(0, 0), (60, 0), (115, -52), (98, -55), (122, -60)]
 
 
@@ -88,12 +88,27 @@ def chunks(bfx):
     return out
 
 
-def engine_vags(vab):
-    """VAG numbers the engine programs play."""
+def program_vags(vab, programs):
+    """VAG numbers the programs play."""
     used = [p for p in range(128) if vab[32 + 16 * p]]
     tones = 32 + 16 * 128
     return sorted({struct.unpack_from("<H", vab, tones + 32 * 16 * i + 22)[0]
-                   for i, p in enumerate(used) if p in ENGINE_PROGRAMS})
+                   for i, p in enumerate(used) if p in programs})
+
+
+def engine_vags(vab):
+    return program_vags(vab, ENGINE_PROGRAMS)
+
+
+def scale(data, k):
+    """A sample k times as loud, block flags kept."""
+    samples, flags = decode(data)
+    blocks, s1, s2 = [], 0, 0
+    for i, f in enumerate(flags):
+        x = [max(-32768, min(32767, round(v * k))) for v in samples[28 * i:28 * i + 28]]
+        body, s1, s2, _ = encode_block(x, s1, s2)
+        blocks.append(body[:1] + bytes([f]) + body[2:])
+    return b"".join(blocks)
 
 
 def resample(x, length, wrap):
@@ -131,15 +146,7 @@ def change_loop(data, pitch, whine):
 def make(bfx, pitch, whine, blowoff=None):
     vab, vb = chunks(bfx)[:2]
     nprogs = struct.unpack_from("<H", vab, 18)[0]
-    if blowoff is not None:
-        vab = bytearray(vab)
-        used = [p for p in range(128) if vab[32 + 16 * p]]
-        for i, p in enumerate(used):
-            if p in BLOWOFF_PROGRAMS:
-                for t in range(vab[32 + 16 * p]):
-                    vab[32 + 16 * 128 + 32 * (16 * i + t) + 2] = blowoff   # tone volume
-        vab = bytes(vab)
-    table = 32 + 16 * 128 + 32 * 16 * nprogs
+    table =32 + 16 * 128 + 32 * 16 * nprogs
     sizes = list(struct.unpack_from("<256H", vab, table))
     vags, pos = [], 0
     for s in sizes:
@@ -149,6 +156,10 @@ def make(bfx, pitch, whine, blowoff=None):
         if vags[v] and decode(vags[v])[1][-1] & 3 == 3:
             vags[v] = change_loop(vags[v], pitch, whine)
             sizes[v] = len(vags[v]) // 8
+    if blowoff is not None:   # the game sets the voices' volume itself, so scale the samples
+        for v in program_vags(vab, BLOWOFF_PROGRAMS):
+            if vags[v]:
+                vags[v] = scale(vags[v], blowoff)
     vab = bytearray(vab)
     struct.pack_into("<256H", vab, table, *sizes)
     vb = b"".join(vags)
@@ -163,7 +174,7 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--pitch", type=float, default=1.0)
     ap.add_argument("--whine", type=float, default=0.0)
-    ap.add_argument("--blowoff", type=int, help="dump valve volume 0-127 (default: unchanged)")
+    ap.add_argument("--blowoff", type=float, help="dump valve and anti-lag volume, 1 as recorded (default)")
     a = ap.parse_args()
     with open(data_track(a.cue), "rb") as img:
         bfx = read_file(img, f"CMRALLY/CARS/{a.car.upper()}/SOUNDS.BFX")

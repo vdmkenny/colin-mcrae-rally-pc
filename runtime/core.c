@@ -5,7 +5,7 @@
 #include <stdlib.h>
 
 CPU cpu;
-uint8_t psx_ram[0x200000];
+uint8_t psx_ram[RAM_SIZE];
 uint8_t psx_scratch[0x400];
 uint32_t cycles_per_insn = 2;
 int log_level = 0;
@@ -125,7 +125,7 @@ static RecompFn *tables[8];
 static bool module_loaded(const Module *m) {
     for (int i = 0; i < 4; i++) {
         uint32_t w;
-        memcpy(&w, psx_ram + ((m->entry & 0x1FFFFF) + i * 4), 4);
+        memcpy(&w, psx_ram + ((m->entry & RAM_MASK) + i * 4), 4);
         if (w != m->sig[i]) return false;
     }
     return true;

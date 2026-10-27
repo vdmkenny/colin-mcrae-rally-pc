@@ -40,6 +40,9 @@ static ObjXform snap[2][MAX_OBJ];
 static int nsnap[2], cur;            // snap[cur] is the latest update, snap[cur ^ 1] the one before
 static bool have_prev, restore_pending, update_ran;
 static bool fast_loop;               // this iteration runs at every vblank instead of every second
+static void use_big_primbufs(uint32_t gp);
+static void raise_view(uint32_t gp);
+static void restore_view(uint32_t gp);
 static long last_update = -10;       // vblank of the last race update
 
 static int snapshot(ObjXform *out) {
@@ -132,12 +135,24 @@ static void restore(void) {
     for (int i = 0; i < nsnap[cur]; i++) write_local(snap[cur][i].addr, snap[cur][i].local);
 }
 
+// game: polls the controllers at the start of each main loop iteration; "newly pressed" is what
+// changed since the previous poll. An iteration that only draws must not poll, or a press it sees
+// is no longer new when the next update looks; its pressed flags (+0x60 of each of the 8 pad
+// slots) are cleared instead, so drawing code cannot act on the last update's presses again.
+int hook_pad_poll(CPU *c) {
+    if (!race_60fps || !fast_loop || (long)(cpu.cycles / CYCLES_PER_FRAME) - last_update >= 2) return 0;
+    for (int i = 0; i < 8; i++) WR32(0x800cfea0u + 0x3c * i, 0);
+    return 1;
+}
+
 // game: one iteration of the main loop (state update, then its drawing). In the race and replay
 // states of a 60 fps race the loop runs every vblank (gp+0xa7c is the game's frame interval),
 // and every vblank has to fit a whole frame, so the emulated CPU runs twice as fast meanwhile;
 // other states (fades between stages) keep the game's own pace.
 int hook_main_iter(CPU *c) {
     static uint32_t saved_cpi;
+    use_big_primbufs(c->r[28]);
+    restore_view(c->r[28]);
     restore();
     update_ran = false;
     if (race_60fps) {
@@ -184,6 +199,7 @@ int hook_race_update(CPU *c) {
 
 // game: draws the 3D scene of every viewport and flips.
 int hook_scene_render(CPU *c) {
+    raise_view(c->r[28]);
     if (race_60fps && getenv("CMR_TRACE_60"))
         LOG("[60fps] draw at vblank %ld%s\n", (long)(cpu.cycles / CYCLES_PER_FRAME), update_ran ? " (after update)" : "");
     if (!race_60fps || !update_ran) return 0;
@@ -206,5 +222,89 @@ int hook_scene_render(CPU *c) {
         j++;
     }
     restore_pending = true;
+    return 0;
+}
+
+// ------------------------------------------------------- draw distance and culling
+// The game drops every polygon and object beyond a far limit (gp+0xa4c, in quarter
+// screen-depth units; trigger zones along the stage change it as the car drives) and outside a
+// view cone as wide as its 4:3 picture (coefficient gp+0xa2c, shared by both axes). While a scene
+// is drawn, and only then, the far limit is raised by draw_distance (up to what the 16-bit screen
+// depth can hold) and the cone is widened to the 16:9 picture plus a margin, so objects do not
+// pop in at the edges; the game's own values are back before any of its logic runs. Fog moves
+// out with the far limit where the stage has none in view (on clear stages the game's fog is
+// black and normally out of reach); foggy and rainy stages keep their limits.
+float draw_distance = 2.0f;
+float cull_margin = 1.15f;
+#define FAR_MAX 16383   // depth << 2 must stay within the 16-bit screen depth
+static bool view_raised;
+static uint32_t saved_far, saved_fog, saved_cone;   // the game's values
+static uint32_t set_far, set_fog, set_cone;         // what was written in their place
+
+static void raise_view(uint32_t gp) {
+    extern bool widescreen_active;
+    if (view_raised) return;
+    view_raised = true;
+    saved_far = RD32(gp + 0xa4c);
+    saved_fog = RD32(gp + 0xa48);
+    saved_cone = RD32(gp + 0xa2c);
+    int32_t far = (int32_t)saved_far;
+    if (draw_distance > 1.0f && (int32_t)saved_fog >= far) {
+        far = (int32_t)((float)far * (draw_distance > 2.0f ? 2.0f : draw_distance));
+        if (far > FAR_MAX) far = FAR_MAX;
+        if (far < (int32_t)saved_far) far = (int32_t)saved_far;
+        WR32(gp + 0xa4c, (uint32_t)far);
+        if ((int32_t)saved_fog < far) WR32(gp + 0xa48, (uint32_t)far);
+    }
+    float k = cull_margin * (widescreen_active ? 4.0f / 3.0f : 1.0f);
+    WR32(gp + 0xa2c, (uint32_t)(int32_t)((float)(int32_t)saved_cone * k));
+    set_far = RD32(gp + 0xa4c); set_fog = RD32(gp + 0xa48); set_cone = RD32(gp + 0xa2c);
+}
+
+// A value the game set itself while drawing (a new view after a replay camera cut) is kept.
+static void restore_view(uint32_t gp) {
+    if (!view_raised) return;
+    view_raised = false;
+    if (RD32(gp + 0xa4c) == set_far) WR32(gp + 0xa4c, saved_far);
+    if (RD32(gp + 0xa48) == set_fog) WR32(gp + 0xa48, saved_fog);
+    if (RD32(gp + 0xa2c) == set_cone) WR32(gp + 0xa2c, saved_cone);
+}
+
+// Each frame's GPU primitives go into one of two buffers, 109000 bytes each on the console,
+// written without checking their end; a renderer also drops detail once a frame passes half and
+// five sixths of the size. The port points the game at two 3 MB buffers in RAM beyond the
+// console's 2 MB instead, so neither a longer draw distance nor the budget can run out. The game
+// still allocates its own (later allocations, and data that depends on where they land, stay
+// as they were); those are handed back when it frees them.
+#define PRIM_CURSOR 0x800b6398u
+#define PRIMBUF_A 0x80200000u
+#define PRIMBUF_B 0x80500000u
+#define PRIMBUF_SIZE 0x300000u
+static uint32_t heap_buf[2];   // the game's own buffers while ours are in use
+
+static void use_big_primbufs(uint32_t gp) {
+    uint32_t a = RD32(gp + 0xa88), b = RD32(gp + 0xa8c);
+    if (!a || !b || a >= PRIMBUF_A) return;
+    heap_buf[0] = a; heap_buf[1] = b;
+    WR32(gp + 0xa88, PRIMBUF_A);
+    WR32(gp + 0xa8c, PRIMBUF_B);
+    WR32(gp + 0xa90, PRIMBUF_SIZE);
+}
+
+// game: FreePrimitiveBuffers() — give the game back its own buffers to free.
+int hook_free_primbuf(CPU *c) {
+    uint32_t gp = c->r[28];
+    if (RD32(gp + 0xa88) >= PRIMBUF_A) WR32(gp + 0xa88, heap_buf[0]);
+    if (RD32(gp + 0xa8c) >= PRIMBUF_A) WR32(gp + 0xa8c, heap_buf[1]);
+    return 0;
+}
+
+// game: the flip at the end of drawing a frame. CMR_TRACE_PRIMBUF=1 logs the buffer use.
+int hook_frame_end(CPU *c) {
+    static int trace = -1;
+    if (trace < 0) trace = getenv("CMR_TRACE_PRIMBUF") != NULL;
+    uint32_t cur = RD32(PRIM_CURSOR);
+    if (trace) LOG("[primbuf] %u bytes, far %d\n", cur - (cur >= PRIMBUF_B ? PRIMBUF_B : PRIMBUF_A), (int32_t)RD32(c->r[28] + 0xa4c));
+    restore_view(c->r[28]);
     return 0;
 }

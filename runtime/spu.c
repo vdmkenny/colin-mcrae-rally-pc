@@ -352,14 +352,14 @@ void spu_dma_write(uint32_t addr, uint32_t words) {
     spu_run_to(cpu.cycles);
     for (uint32_t i = 0; i < words * 4; i += 2) {
         check_irq(transfer_addr);
-        memcpy(spu_ram + (transfer_addr & 0x7FFFE), psx_ram + ((addr + i) & 0x1FFFFE), 2);
+        memcpy(spu_ram + (transfer_addr & 0x7FFFE), psx_ram + ((addr + i) & RAM_MASK & ~1u), 2);
         transfer_addr = (transfer_addr + 2) & 0x7FFFF;
     }
 }
 
 void spu_dma_read(uint32_t addr, uint32_t words) {
     for (uint32_t i = 0; i < words * 4; i += 2) {
-        memcpy(psx_ram + ((addr + i) & 0x1FFFFE), spu_ram + (transfer_addr & 0x7FFFE), 2);
+        memcpy(psx_ram + ((addr + i) & RAM_MASK & ~1u), spu_ram + (transfer_addr & 0x7FFFE), 2);
         transfer_addr = (transfer_addr + 2) & 0x7FFFF;
     }
 }

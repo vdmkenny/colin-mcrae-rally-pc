@@ -572,7 +572,7 @@ void cdrom_write(int reg, uint8_t v) {
 void cdrom_dma(uint32_t addr, uint32_t words) {
     for (uint32_t i = 0; i < words * 4; i++) {
         uint8_t b = data_pos < data_len ? data_fifo[data_pos++] : 0;
-        psx_ram[(addr + i) & 0x1FFFFF] = b;
+        psx_ram[(addr + i) & RAM_MASK] = b;
     }
 }
 

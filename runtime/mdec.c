@@ -207,7 +207,7 @@ void mdec_dma_in(uint32_t addr, uint32_t words) {
     mdec_activity += (int)words;
     for (uint32_t i = 0; i < words; i++) {
         uint32_t w;
-        memcpy(&w, psx_ram + ((addr + i * 4) & 0x1FFFFC), 4);
+        memcpy(&w, psx_ram + ((addr + i * 4) & RAM_MASK & ~3u), 4);
         input_word(w);
     }
 }
@@ -215,6 +215,6 @@ void mdec_dma_in(uint32_t addr, uint32_t words) {
 void mdec_dma_out(uint32_t addr, uint32_t words) {
     for (uint32_t i = 0; i < words; i++) {
         uint32_t w = out_pos < out_len ? out_buf[out_pos++] : 0;
-        memcpy(psx_ram + ((addr + i * 4) & 0x1FFFFC), &w, 4);
+        memcpy(psx_ram + ((addr + i * 4) & RAM_MASK & ~3u), &w, 4);
     }
 }

@@ -6,7 +6,7 @@
 
 typedef struct { float x, y, w; uint32_t value; uint32_t key; } PgxpVal;
 
-static PgxpVal shadow_ram[0x200000 / 4];
+static PgxpVal shadow_ram[RAM_SIZE / 4];
 static PgxpVal shadow_scratch[0x400 / 4];
 static PgxpVal gpr[32];
 bool pgxp_enabled = true;
@@ -18,7 +18,7 @@ uint32_t pgxp_sxy_key[3];
 
 static PgxpVal *slot(uint32_t addr) {
     uint32_t p = addr & 0x1FFFFFFF;
-    if (p < 0x00800000) return &shadow_ram[(p & 0x1FFFFC) >> 2];
+    if (p < 0x00800000) return &shadow_ram[(p & RAM_MASK & ~3u) >> 2];
     if ((p & 0xFFFFFC00) == 0x1F800000) return &shadow_scratch[(p & 0x3FC) >> 2];
     return NULL;
 }

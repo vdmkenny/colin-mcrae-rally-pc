@@ -33,8 +33,19 @@ This is an unofficial fan project, not affiliated with Codemasters or Sony.
   vblank but the game's update only every second one; the frames in between draw the scene
   half way between the last two updates, interpolating the transforms of the game's own scene
   graph (car, wheels, camera), so motion is smooth and the simulation, handling and stage
-  times are exactly those of 30 fps. Costs one vblank (17 ms) of latency; `--no-race-60fps`
-  or `race_60fps = 0` restores 30 fps. Rally School stays at 30 fps
+  times are exactly those of 30 fps. Controllers are read on update frames only, so a press is
+  never missed. Costs one vblank (17 ms) of latency; `--no-race-60fps` or `race_60fps = 0`
+  restores 30 fps. Rally School stays at 30 fps
+- Longer draw distance and less culling: while the game draws a scene, its far limit is raised
+  up to 2x (as far as the 16-bit screen depth allows) on stages without fog in view, and its
+  view cone, as wide as the 4:3 picture on the console, is widened to the 16:9 one plus a
+  margin so scenery does not pop in at the edges. The game's logic keeps its own values.
+  `--draw-distance 1..2` or `draw_distance = ...` (1 = original); foggy and rainy stages
+  keep their fog
+- More memory than the console: the game sees 8 MB of RAM instead of 2 MB, and its two GPU
+  primitive buffers (109 KB each, filled without bounds checks) are swapped for 3 MB ones in
+  the extra space, which also lifts a renderer's detail cut-back when a frame nears the buffer
+  size
 - Fast loading: while the game reads data from the CD (with no video, streamed audio or 3D
   scene running) the emulation fast-forwards, so loads take a fraction of the time; the
   game itself sees normal timing. `--no-fast-loading` or `fast_loading = 0` turns it off
@@ -123,6 +134,7 @@ fast-forward, Shift+Esc quit.
 --no-rumble       disable vibration
 --no-fast-loading load at the original CD speed
 --no-race-60fps   races at the game's own 30 fps
+--draw-distance X draw distance multiplier on stages without fog, 1 to 2 (default 2)
 --mute            no audio output
 --cpu N           emulated CPU cost per instruction (default 2; 1 = faster CPU)
 ```
@@ -136,8 +148,9 @@ Settings and memory cards live in the user preferences folder
   into C. Functions are discovered from a Ghidra analysis (`tools/functions/`), jal targets
   and code pointers; branches and delay slots map to gotos, `jal` to C calls, jump tables
   to `switch`. `tools/hooks.txt` attaches native code to specific game functions
-  (`runtime/hooks.c`): the 60 fps races hook the main loop, the race and replay updates
-  and the scene renderer.
+  (`runtime/hooks.c`): the 60 fps races hook the main loop, the controller poll, the race and
+  replay updates and the scene renderer; the draw distance and view cone are raised around
+  the scene renderer; the primitive buffers are swapped in the main loop.
 - The game rewrites parts of its own rendering code while it runs: the ambient light colour
   and the screen clipping bounds are patched into instruction immediates, and mirrored views
   flip a culling branch. The recompiler finds these patch sites (stores to constant code
@@ -184,4 +197,5 @@ debug mode with the Vulkan validation layers when installed), `CMR_REFRESH_HZ=<h
 the monitor runs at that rate), `CMR_TRACE_LOAD=1` (log when the CD is loading, streaming or
 playing music, which drives fast loading), `CMR_DUMP_HW=<frame>` (the triangles of one frame
 as the renderer draws them), `CMR_TRACE_60=1` (60 fps race updates and draws, and the car
-position per update).
+position per update), `CMR_TRACE_PRIMBUF=1` (primitive buffer use per frame),
+`CMR_CULL_MARGIN=<k>` (view cone margin, 1 = none).

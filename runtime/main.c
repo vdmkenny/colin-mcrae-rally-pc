@@ -326,6 +326,7 @@ static void handle_events(void) {
 
 extern int frame_interval_override;
 extern bool race_60fps;
+extern float draw_distance, cull_margin;
 
 // ----------------------------------------------------------------- frames
 // With vsync, images are presented to the refresh of the monitor the window is on. When its
@@ -464,7 +465,7 @@ static void watch_ram(void) {
         n = 0;
         const char *e = getenv("CMR_WATCH");
         while (e && *e && n < 16) {
-            addrs[n] = (uint32_t)strtoul(e, (char **)&e, 16) & 0x1FFFFC;
+            addrs[n] = (uint32_t)strtoul(e, (char **)&e, 16) & RAM_MASK & ~3u;
             memcpy(&vals[n], psx_ram + addrs[n], 4);
             n++;
             if (*e == ',') e++;
@@ -484,9 +485,9 @@ static void poke_ram(void) {
     const char *e = getenv("CMR_POKE");
     while (e && *e) {
         long f = strtol(e, (char **)&e, 10);
-        uint32_t a = (uint32_t)strtoul(e + 1, (char **)&e, 16) & 0x1FFFFC, v;
+        uint32_t a = (uint32_t)strtoul(e + 1, (char **)&e, 16) & RAM_MASK & ~3u, v;
         if (e[1] == '@') {
-            uint32_t src = (uint32_t)strtoul(e + 2, (char **)&e, 16) & 0x1FFFFC;
+            uint32_t src = (uint32_t)strtoul(e + 2, (char **)&e, 16) & RAM_MASK & ~3u;
             memcpy(&v, psx_ram + src, 4);
         } else {
             v = (uint32_t)strtoul(e + 1, (char **)&e, 16);
@@ -598,6 +599,7 @@ static void apply_setting(const char *k, const char *v) {
     else if (!strcmp(k, "rumble")) rumble_enabled = n;
     else if (!strcmp(k, "fast_loading")) fast_loading = n;
     else if (!strcmp(k, "race_60fps")) race_60fps = n;
+    else if (!strcmp(k, "draw_distance")) draw_distance = (float)atof(v);
     else if (!strcmp(k, "controller")) {
         for (int c = 0; c < 4; c++) if (!strcmp(v, controller_names[c])) controller_type = c;
     }
@@ -632,7 +634,8 @@ static void save_settings(void) {
     fprintf(f, "settings_version = %d\nmsaa = %d\n", SETTINGS_VERSION, render_cfg.msaa);
     fprintf(f, "fullscreen = %d\nwindow = %d\nscale = %d\nhires = %d\nfilter = %d\nwidescreen = %d\n",
             opts.fullscreen, opts.scale, render_cfg.scale, render_cfg.hw, render_cfg.filter, render_cfg.widescreen);
-    fprintf(f, "rumble = %d\nfast_loading = %d\nrace_60fps = %d\n", rumble_enabled, fast_loading, race_60fps);
+    fprintf(f, "rumble = %d\nfast_loading = %d\nrace_60fps = %d\ndraw_distance = %.2f\n", rumble_enabled, fast_loading,
+            race_60fps, draw_distance);
     fprintf(f, "pgxp = %d\nvsync = %d\ndither = %d\ncontroller = %s\ncpu = %u\n", pgxp_enabled, vsync,
             gpu_dither_enabled, controller_names[controller_type], cycles_per_insn);
     fclose(f);
@@ -648,6 +651,7 @@ static void usage(void) {
             "  --no-rumble         disable DualShock vibration\n"
             "  --no-fast-loading   load at the original CD speed\n"
             "  --no-race-60fps     races at the game's own 30 fps (default: 60)\n"
+            "  --draw-distance X   draw distance multiplier on clear stages, 1-2 (default 2)\n"
             "  --mute              no audio output\n"
             "  --cpu N             CPU cycles per instruction (default 2; 1 = faster CPU)\n"
             "  --no-dither         disable PlayStation dithering (toggle with F3)\n"
@@ -670,6 +674,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--save-dir")) snprintf(save_dir, sizeof save_dir, "%s/", argv[i + 1]);
     snprintf(settings_path, sizeof settings_path, "%scmrally.ini", save_dir);
     load_settings();
+    if (getenv("CMR_CULL_MARGIN")) cull_margin = (float)atof(getenv("CMR_CULL_MARGIN"));   // testing
     bool testing = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--fullscreen")) opts.fullscreen = true;
@@ -688,6 +693,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--interval") && i + 1 < argc) frame_interval_override = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--race-60fps")) race_60fps = true;
         else if (!strcmp(argv[i], "--no-race-60fps")) race_60fps = false;
+        else if (!strcmp(argv[i], "--draw-distance") && i + 1 < argc) draw_distance = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) {
             wav_out = fopen(argv[++i], "wb");
             if (wav_out) { wav_header(); atexit(close_wav); }

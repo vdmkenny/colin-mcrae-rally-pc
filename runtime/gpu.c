@@ -745,7 +745,7 @@ void gpu_vblank(void) {
 
 void gpu_dma_block(uint32_t addr, uint32_t words, bool to_gpu) {
     for (uint32_t i = 0; i < words; i++) {
-        uint32_t a = (addr + i * 4) & 0x1FFFFC;
+        uint32_t a = (addr + i * 4) & RAM_MASK & ~3u;
         if (to_gpu) { uint32_t w; memcpy(&w, psx_ram + a, 4); word_addr = a; gpu_gp0(w); word_addr = PGXP_NO_ADDR; }
         else { uint32_t w = gpu_read(); memcpy(psx_ram + a, &w, 4); }
     }
@@ -753,20 +753,20 @@ void gpu_dma_block(uint32_t addr, uint32_t words, bool to_gpu) {
 
 void gpu_dma_list(uint32_t addr) {
     int guard = 0x100000;
-    addr &= 0x1FFFFC;
+    addr &= RAM_MASK & ~3u;
     for (;;) {
         uint32_t hdr;
         memcpy(&hdr, psx_ram + addr, 4);
         uint32_t n = hdr >> 24;
         for (uint32_t i = 0; i < n; i++) {
             uint32_t w;
-            word_addr = (addr + 4 + i * 4) & 0x1FFFFC;
+            word_addr = (addr + 4 + i * 4) & RAM_MASK & ~3u;
             memcpy(&w, psx_ram + word_addr, 4);
             gpu_gp0(w);
         }
         word_addr = PGXP_NO_ADDR;
         if ((hdr & 0x800000) || --guard == 0) break;
-        addr = hdr & 0x1FFFFC;
+        addr = hdr & RAM_MASK & ~3u;
     }
 }
 

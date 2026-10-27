@@ -27,7 +27,7 @@ static bool mdec_out_pending;
 
 static void dma_run(int ch) {
     uint32_t chcr = dma_chcr[ch];
-    uint32_t addr = dma_madr[ch] & 0x1FFFFC;
+    uint32_t addr = dma_madr[ch] & RAM_MASK & ~3u;
     uint32_t sync = (chcr >> 9) & 3;
     bool to_dev = chcr & 1;
     uint32_t words;
@@ -56,9 +56,9 @@ static void dma_run(int ch) {
     case 6: {  // OTC: build an empty ordering table, back to front
         uint32_t a = addr;
         for (uint32_t i = 0; i < words; i++) {
-            uint32_t v = (i == words - 1) ? 0x00FFFFFF : ((a - 4) & 0x1FFFFF);
+            uint32_t v = (i == words - 1) ? 0x00FFFFFF : ((a - 4) & RAM_MASK);
             memcpy(psx_ram + a, &v, 4);
-            a = (a - 4) & 0x1FFFFC;
+            a = (a - 4) & RAM_MASK & ~3u;
         }
         break;
     }

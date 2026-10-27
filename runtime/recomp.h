@@ -22,7 +22,11 @@ typedef struct {
 } Module;
 
 extern CPU cpu;
-extern uint8_t psx_ram[0x200000];
+// Main RAM. The console has 2 MB; the port gives the game the whole 8 MB the address map
+// reserves for RAM (the extra 6 MB is not mirrored), for buffers moved out of the 2 MB.
+#define RAM_SIZE 0x800000u
+#define RAM_MASK (RAM_SIZE - 1)
+extern uint8_t psx_ram[RAM_SIZE];
 extern uint8_t psx_scratch[0x400];
 extern uint32_t cycles_per_insn;
 
@@ -76,38 +80,38 @@ void mem_write_slow(uint32_t addr, uint32_t v, int size);
 // Memory access: RAM and scratchpad inline, everything else through the slow path.
 static inline uint32_t RD32(uint32_t a) {
     uint32_t p = a & 0x1FFFFFFF;
-    if (p < 0x00800000) { uint32_t v; memcpy(&v, psx_ram + (p & 0x1FFFFC), 4); return v; }
+    if (p < 0x00800000) { uint32_t v; memcpy(&v, psx_ram + (p & (RAM_MASK & ~3u)), 4); return v; }
     if ((p & 0xFFFFFC00) == 0x1F800000) { uint32_t v; memcpy(&v, psx_scratch + (p & 0x3FC), 4); return v; }
     return mem_read_slow(a, 4);
 }
 static inline uint32_t RD16(uint32_t a) {
     uint32_t p = a & 0x1FFFFFFF;
-    if (p < 0x00800000) { uint16_t v; memcpy(&v, psx_ram + (p & 0x1FFFFE), 2); return v; }
+    if (p < 0x00800000) { uint16_t v; memcpy(&v, psx_ram + (p & (RAM_MASK & ~1u)), 2); return v; }
     if ((p & 0xFFFFFC00) == 0x1F800000) { uint16_t v; memcpy(&v, psx_scratch + (p & 0x3FE), 2); return v; }
     return mem_read_slow(a, 2);
 }
 static inline uint32_t RD8(uint32_t a) {
     uint32_t p = a & 0x1FFFFFFF;
-    if (p < 0x00800000) return psx_ram[p & 0x1FFFFF];
+    if (p < 0x00800000) return psx_ram[p & RAM_MASK];
     if ((p & 0xFFFFFC00) == 0x1F800000) return psx_scratch[p & 0x3FF];
     return mem_read_slow(a, 1);
 }
 static inline void WR32(uint32_t a, uint32_t v) {
     uint32_t p = a & 0x1FFFFFFF;
-    if (p < 0x00800000) { memcpy(psx_ram + (p & 0x1FFFFC), &v, 4); return; }
+    if (p < 0x00800000) { memcpy(psx_ram + (p & (RAM_MASK & ~3u)), &v, 4); return; }
     if ((p & 0xFFFFFC00) == 0x1F800000) { memcpy(psx_scratch + (p & 0x3FC), &v, 4); return; }
     mem_write_slow(a, v, 4);
 }
 static inline void WR16(uint32_t a, uint32_t v) {
     uint32_t p = a & 0x1FFFFFFF;
     uint16_t h = (uint16_t)v;
-    if (p < 0x00800000) { memcpy(psx_ram + (p & 0x1FFFFE), &h, 2); return; }
+    if (p < 0x00800000) { memcpy(psx_ram + (p & (RAM_MASK & ~1u)), &h, 2); return; }
     if ((p & 0xFFFFFC00) == 0x1F800000) { memcpy(psx_scratch + (p & 0x3FE), &h, 2); return; }
     mem_write_slow(a, v & 0xFFFF, 2);
 }
 static inline void WR8(uint32_t a, uint32_t v) {
     uint32_t p = a & 0x1FFFFFFF;
-    if (p < 0x00800000) { psx_ram[p & 0x1FFFFF] = (uint8_t)v; return; }
+    if (p < 0x00800000) { psx_ram[p & RAM_MASK] = (uint8_t)v; return; }
     if ((p & 0xFFFFFC00) == 0x1F800000) { psx_scratch[p & 0x3FF] = (uint8_t)v; return; }
     mem_write_slow(a, v & 0xFF, 1);
 }

@@ -5,3 +5,6 @@ game 80059108 hook_main_iter
 game 8004e9cc hook_race_update
 game 8004ef6c hook_race_update
 game 8003aa30 hook_scene_render
+game 800966d0 hook_frame_end
+game 800961ec hook_free_primbuf
+game 8009b45c hook_pad_poll

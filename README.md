@@ -23,6 +23,12 @@ This is an unofficial fan project, not affiliated with Codemasters or Sony.
   resolution
 - Gamepads (anything SDL3 supports) act as a DualShock: analog stick steering and
   vibration, as on the original hardware; a Namco NeGcon mode adds analog throttle/brake
+- 60 fps races: the game simulates a fixed 1/30 s per frame, so the race loop runs every
+  vblank but the game's update only every second one; the frames in between draw the scene
+  half way between the last two updates, interpolating the transforms of the game's own scene
+  graph (car, wheels, camera), so motion is smooth and the simulation, handling and stage
+  times are exactly those of 30 fps. Costs one vblank (17 ms) of latency; `--no-race-60fps`
+  or `race_60fps = 0` restores 30 fps. Rally School stays at 30 fps
 - Fast loading: while the game reads data from the CD (with no video, streamed audio or 3D
   scene running) the emulation fast-forwards, so loads take a fraction of the time; the
   game itself sees normal timing. `--no-fast-loading` or `fast_loading = 0` turns it off
@@ -110,6 +116,7 @@ fast-forward, Shift+Esc quit.
 --controller T    auto (DualShock with a gamepad, else digital), dualshock, negcon, digital
 --no-rumble       disable vibration
 --no-fast-loading load at the original CD speed
+--no-race-60fps   races at the game's own 30 fps
 --mute            no audio output
 --cpu N           emulated CPU cost per instruction (default 2; 1 = faster CPU)
 ```
@@ -122,7 +129,9 @@ Settings and memory cards live in the user preferences folder
 - `tools/recomp.py` translates each executable (boot loader, frontend, game, rally school)
   into C. Functions are discovered from a Ghidra analysis (`tools/functions/`), jal targets
   and code pointers; branches and delay slots map to gotos, `jal` to C calls, jump tables
-  to `switch`. `tools/hooks.txt` attaches native code to specific game functions.
+  to `switch`. `tools/hooks.txt` attaches native code to specific game functions
+  (`runtime/hooks.c`): the 60 fps races hook the main loop, the race and replay updates
+  and the scene renderer.
 - The game rewrites parts of its own rendering code while it runs: the ambient light colour
   and the screen clipping bounds are patched into instruction immediates, and mirrored views
   flip a culling branch. The recompiler finds these patch sites (stores to constant code
@@ -152,10 +161,10 @@ Boots through the FMVs and menus into championship stages, pausing and quitting 
 frontend; Rally School; the attract-mode demo; two-player split screen; memory card save and
 load. Verified in real time at 60 emulated fps with the high-resolution renderer on an
 Apple Silicon Mac (120 Hz display, Metal), and on Linux with Vulkan (Mesa lavapipe in a
-container), with identical output and no Vulkan validation errors. Races run at the game's
-own 30 fps: its simulation advances a fixed step per frame, so rendering more frames would
-need the game's time steps reworked. A full championship has not been played through, so
-later stages and end-of-rally screens are less tested.
+container), with identical output and no Vulkan validation errors. Races run at 60 fps;
+stage finishes, results, the next stage and two-player split screen work in that mode, and the
+car's path is identical to 30 fps tick for tick. A full championship has not been played
+through, so later stages and end-of-rally screens are less tested.
 
 Development aids: `--log N`, `--turbo`, `--hidden`, `--exit-after N`, `--shot-every N --shot-dir D`,
 `--script "from-to:buttons[:twist[:throttle]];..."` (`--script2` for port 2), `--wav file.wav`,
@@ -168,4 +177,5 @@ at exit), `CMR_ANALOG_AT=<frame>` (press ANALOG on port 1), `CMR_GPU_DEBUG=1` (S
 debug mode with the Vulkan validation layers when installed), `CMR_REFRESH_HZ=<hz>` (pretend
 the monitor runs at that rate), `CMR_TRACE_LOAD=1` (log when the CD is loading, streaming or
 playing music, which drives fast loading), `CMR_DUMP_HW=<frame>` (the triangles of one frame
-as the renderer draws them).
+as the renderer draws them), `CMR_TRACE_60=1` (60 fps race updates and draws, and the car
+position per update).

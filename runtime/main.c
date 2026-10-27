@@ -325,6 +325,7 @@ static void handle_events(void) {
 }
 
 extern int frame_interval_override;
+extern bool race_60fps;
 
 // ----------------------------------------------------------------- frames
 // With vsync, images are presented to the refresh of the monitor the window is on. When its
@@ -596,6 +597,7 @@ static void apply_setting(const char *k, const char *v) {
     else if (!strcmp(k, "dither")) gpu_dither_enabled = n;
     else if (!strcmp(k, "rumble")) rumble_enabled = n;
     else if (!strcmp(k, "fast_loading")) fast_loading = n;
+    else if (!strcmp(k, "race_60fps")) race_60fps = n;
     else if (!strcmp(k, "controller")) {
         for (int c = 0; c < 4; c++) if (!strcmp(v, controller_names[c])) controller_type = c;
     }
@@ -630,7 +632,7 @@ static void save_settings(void) {
     fprintf(f, "settings_version = %d\nmsaa = %d\n", SETTINGS_VERSION, render_cfg.msaa);
     fprintf(f, "fullscreen = %d\nwindow = %d\nscale = %d\nhires = %d\nfilter = %d\nwidescreen = %d\n",
             opts.fullscreen, opts.scale, render_cfg.scale, render_cfg.hw, render_cfg.filter, render_cfg.widescreen);
-    fprintf(f, "rumble = %d\nfast_loading = %d\n", rumble_enabled, fast_loading);
+    fprintf(f, "rumble = %d\nfast_loading = %d\nrace_60fps = %d\n", rumble_enabled, fast_loading, race_60fps);
     fprintf(f, "pgxp = %d\nvsync = %d\ndither = %d\ncontroller = %s\ncpu = %u\n", pgxp_enabled, vsync,
             gpu_dither_enabled, controller_names[controller_type], cycles_per_insn);
     fclose(f);
@@ -645,6 +647,7 @@ static void usage(void) {
             "                      negcon (analog throttle/brake, no vibration), digital\n"
             "  --no-rumble         disable DualShock vibration\n"
             "  --no-fast-loading   load at the original CD speed\n"
+            "  --no-race-60fps     races at the game's own 30 fps (default: 60)\n"
             "  --mute              no audio output\n"
             "  --cpu N             CPU cycles per instruction (default 2; 1 = faster CPU)\n"
             "  --no-dither         disable PlayStation dithering (toggle with F3)\n"
@@ -683,6 +686,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-rumble")) rumble_enabled = false;
         else if (!strcmp(argv[i], "--no-fast-loading")) fast_loading = false;
         else if (!strcmp(argv[i], "--interval") && i + 1 < argc) frame_interval_override = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--race-60fps")) race_60fps = true;
+        else if (!strcmp(argv[i], "--no-race-60fps")) race_60fps = false;
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) {
             wav_out = fopen(argv[++i], "wb");
             if (wav_out) { wav_header(); atexit(close_wav); }

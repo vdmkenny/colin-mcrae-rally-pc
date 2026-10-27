@@ -472,19 +472,28 @@ static void resolve_frame(OpList *l) {
     for (int i = 0; i < l->n; i++) {
         Op *o = &l->ops[i];
         if (o->type != OP_TRI) continue;
+        // A translucent sprite built by the CPU (a sun flare) can have one corner on a 3D vertex's
+        // pixel by coincidence; snapping it would distort the sprite and make it count as 3D in
+        // widescreen. Translucent geometry made of copied GTE vertices (the car's shadow) matches
+        // on at least two corners; opaque geometry is snapped on any match (CPU-clipped terrain).
+        int match[3] = {-1, -1, -1}, nmatch = 0;
         for (int k = 0; k < 3; k++) {
             HwVertex *v = &o->v[k];
             if (v->precise || !pgxp_enabled) continue;
             uint32_t h = vc_hash(v->xyword, o->a[0], o->a[1]);
             for (int n = 0; n < 16; n++, h = (h + 1) & (VC_SLOTS - 1)) {
                 if (vc[h].gen != vc_gen) break;
-                if (vc[h].xy == v->xyword && vc[h].ox == o->a[0] && vc[h].oy == o->a[1]) {
-                    v->x = o->a[0] + vc[h].x; v->y = o->a[1] + vc[h].y; v->key = vc[h].key;
-                    v->w = vc[h].w;
-                    v->precise = true;
-                    break;
-                }
+                if (vc[h].xy == v->xyword && vc[h].ox == o->a[0] && vc[h].oy == o->a[1]) { match[k] = (int)h; nmatch++; break; }
             }
+        }
+        bool sprite = o->p.semi && !o->v[0].precise && !o->v[1].precise && !o->v[2].precise;
+        for (int k = 0; k < 3 && (!sprite || nmatch >= 2); k++) {
+            if (match[k] < 0) continue;
+            HwVertex *v = &o->v[k];
+            int h = match[k];
+            v->x = o->a[0] + vc[h].x; v->y = o->a[1] + vc[h].y; v->key = vc[h].key;
+            v->w = vc[h].w;
+            v->precise = true;
         }
         // perspective needs depth on all three vertices
         bool all = o->p.textured && o->v[0].precise && o->v[1].precise && o->v[2].precise &&
@@ -497,7 +506,8 @@ static void resolve_frame(OpList *l) {
 // Widescreen: the GTE already widened the 3D projection; 2D elements keep their 4:3
 // proportions instead of being stretched, each anchored to the left edge, centre or right edge
 // by which third of the screen it is in. A line of text is one element: consecutive 2D
-// primitives of similar height side by side on the same line move as a group. Sprites
+// primitives of similar, text-like height (up to 32 pixels) side by side on the same line move
+// as a group. Sprites
 // placed in 3D (dust, smoke) keep their place and are narrowed; elements spanning the screen
 // (menu bars) stretch to the full width. Decided after the vertex resolution above.
 static void squeeze_ops(OpList *l, int i, int j, float anchor) {
@@ -534,7 +544,7 @@ static void widescreen_frame(OpList *l) {
         }
         if (gi >= 0) {
             float hp = py2 - py1, hn = maxy - miny, h = fminf(hp, hn);
-            bool joins = is2d && o->a[0] == ga->a[0] && o->a[2] == ga->a[2] && h >= 4 && fmaxf(hp, hn) <= 2 * h &&
+            bool joins = is2d && o->a[0] == ga->a[0] && o->a[2] == ga->a[2] && h >= 4 && fmaxf(hp, hn) <= fminf(2 * h, 32) &&
                          miny < py2 && maxy > py1 && minx <= px2 + h && maxx >= px1 - h;
             if (joins) {
                 gj = j;
@@ -592,8 +602,12 @@ static void set_uvlim(const OpList *l, int i) {
         cur_voff = fminf((top->v - bottom->v) / (bottom->y - top->y), 1.0f);
     umin += cur_uoff; umax += cur_uoff;
     vmin += cur_voff; vmax += cur_voff;
-    // texel coordinates are floored, so the last texel of a span is max - 1 when max is fractional
-    int u0 = (int)umin, v0 = (int)vmin, u1 = (int)(umax - 0.001f), v1 = (int)(vmax - 0.001f);
+    // texel coordinates are floored, so the last texel of a span is max - 1 when max is fractional;
+    // on a mirrored axis the low end is the one shifted by the offset, and only whole texels count
+    // there (the column below it is outside the image and would bleed in when filtering)
+    int u0 = cur_uoff > 0.0f ? (int)ceilf(umin - 0.001f) : (int)umin;
+    int v0 = cur_voff > 0.0f ? (int)ceilf(vmin - 0.001f) : (int)vmin;
+    int u1 = (int)(umax - 0.001f), v1 = (int)(vmax - 0.001f);
     if (u1 < u0) u1 = u0;
     if (v1 < v0) v1 = v0;
     // Terrain and sky polygons each map a whole aligned tile whose texture continues on the

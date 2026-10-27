@@ -26,7 +26,7 @@ static SDL_Gamepad *gamepad;
 static uint32_t frame_rgba[640 * 512];
 
 static uint64_t next_vblank;
-static uint64_t pace_ns;
+static uint64_t pace_ns;   // target time of the end of the previous vblank
 static bool fast_forward;
 static bool vsync = true;
 static bool vsync_paces;     // the display runs at ~60 Hz, so buffer swaps pace emulation
@@ -262,7 +262,11 @@ static void present(float alpha) {
 static void present_vblank(void) {
     int interval = render_frame_interval(), k = render_vblanks_since_flip();
     int n = presents_per_vblank;
+    const uint64_t frame_ns = 1000000000ull * 1001 / 60000;
+    uint64_t deadline = pace_ns + frame_ns;   // when this vblank's time is up
     for (int p = 0; p < n; p++) {
+        // Extra images are optional: skip them rather than slow the game down.
+        if (p > 0 && !opts.turbo && SDL_GetTicksNS() + frame_ns / (uint64_t)n / 2 > deadline) break;
         float alpha = 1.0f;
         if (render_cfg.interpolate && interval >= 2 && interval <= 4)
             alpha = (float)(k * n + p + 1) / (float)(interval * n);

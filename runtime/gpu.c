@@ -2,6 +2,7 @@
 #include "psx.h"
 #include "pgxp.h"
 #include "render.h"
+#include <stdlib.h>
 
 uint16_t vram[1024 * 512];
 
@@ -26,6 +27,7 @@ bool gpu_dither_enabled = true;
 
 uint32_t gpu_stat_precise, gpu_stat_imprecise;
 uint32_t gpu_mix_stats[3];
+int gpu_dump_now;
 
 // command fifo; cmd_addr holds the RAM address each word came from (DMA) for PGXP lookups
 static uint32_t cmd[16];
@@ -515,6 +517,11 @@ uint32_t gpu_stat_prims, gpu_stat_uploads, gpu_stat_fills, gpu_stat_flips;
 
 static void exec_cmd(void) {
     uint32_t op = cmd[0] >> 24;
+    if (gpu_dump_now && op >= 0x20 && op < 0x80) {
+        LOG("[cmd] off=%d,%d page=%03x:", off_x, off_y, texpage);
+        for (int i = 0; i < cmd_size(op); i++) LOG(" %08x", cmd[i]);
+        LOG("\n");
+    }
     if (op >= 0x20 && op < 0x80) gpu_stat_prims++;
     else if (op >= 0xA0 && op < 0xC0) gpu_stat_uploads++;
     else if (op == 0x02) gpu_stat_fills++;
@@ -647,6 +654,10 @@ void gpu_gp1(uint32_t v) {
     case 0x05:
         if ((v & 0x3FE) != disp_x || ((v >> 10) & 0x1FF) != disp_y) {
             gpu_stat_flips++;
+            if (getenv("CMR_DUMP_PRIMS")) {
+                int f = (int)(cpu.cycles / CYCLES_PER_FRAME), want = atoi(getenv("CMR_DUMP_PRIMS"));
+                gpu_dump_now = f >= want && f < want + 2;
+            }
             hw_flip();
             pgxp_new_frame();
         }

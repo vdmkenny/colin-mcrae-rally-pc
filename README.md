@@ -112,5 +112,6 @@ interpolation. Widescreen shows the wider view, but the game still culls some sc
 outside its original 4:3 view, and the 2D HUD is stretched.
 
 Development aids: `--log N`, `--turbo`, `--exit-after N`, `--shot-every N --shot-dir D`,
-`--script "from-to:buttons;..."`, `--wav file.wav`, and the recent-function trace printed on
-fatal errors.
+`--script "from-to:buttons[:twist[:throttle]];..."`, `--wav file.wav`, `--save-dir D`,
+`CMR_DUMP_PRIMS=<frame>` (raw GPU commands), and the recent-function trace and shadow call
+stack printed on fatal errors.

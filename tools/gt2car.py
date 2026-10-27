@@ -606,32 +606,71 @@ def medium_files(gt2, paint, base, rim):
     return cmrcar.ModelFile(scenes), cmrcar.TIM(2, None, (832, 0, 64, 255, data))
 
 
-def tail_light(tris):
-    """The game lights a brake light by drawing its outline (4 to 6 points) over it: the left tail
-    lamp's largest rear-facing triangle pair, pulled in a little and out 1 cm, wound outward."""
-    def area(t):
-        (a, _), (b, _), (c, _) = t[0]
-        return math.sqrt(sum(x * x for x in cross([q - p for p, q in zip(a, b)], [q - p for p, q in zip(a, c)]))) / 2
-    rear = [t for t in tris if t[4] == LAMP and t[0][0][0][0] < 0 and t[0][0][0][2] > 0
-            and sum(n[0] for _, n in t[0]) < -1.5]
+def lamp_texels(rear, paint, red):
+    """The corners of the opaque texels (only red ones if red) painted on faces, placed on the faces."""
+    pts = []
+    for t in rear:
+        (p0, _), (p1, _), (p2, _) = t[0]
+        (u0, v0), (u1, v1), (u2, v2) = t[1]
+        det = (u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0)
+        if not det:
+            continue
+        pal = paint["palettes"][t[2]]
+
+        def bary(u, v):
+            return (((u - u0) * (v2 - v0) - (u2 - u0) * (v - v0)) / det,
+                    ((u1 - u0) * (v - v0) - (u - u0) * (v1 - v0)) / det)
+
+        def at(u, v):
+            a, b = bary(u, v)
+            return tuple(q0 + a * (q1 - q0) + b * (q2 - q0) for q0, q1, q2 in zip(p0, p1, p2))
+        for v in range(min(v0, v1, v2), max(v0, v1, v2)):
+            for u in range(min(u0, u1, u2), max(u0, u1, u2)):
+                a, b = bary(u + 0.5, v + 0.5)
+                c = pal[paint["pixels"][v * 256 + u]]
+                r, g, bl = rgb_of(c)
+                if (a < -1e-6 or b < -1e-6 or a + b > 1 + 1e-6 or not c & 0x7fff
+                        or red and not (r >= 40 and r >= g + 24 and r >= bl + 16)):
+                    continue
+                pts += [at(u + du, v + dv) for du in (0, 1) for dv in (0, 1)]
+    return pts
+
+
+def tail_light(tris, paint):
+    """The game lights a brake light by drawing its outline (4 to 6 points) over it: the outline of
+    the red lens painted on the left tail lamp's rear-facing faces (the whole lamp when none of it
+    is red), seen from behind, out 1 cm and wound outward. Only the faces within 25 degrees of the
+    one facing most backward count, not where the lamp wraps round the corner."""
+    facing = lambda t: norm([sum(n[i] for _, n in t[0]) for i in range(3)])
+    rear = [t for t in tris if t[4] == LAMP and t[1] and t[0][0][0][0] < 0 and t[0][0][0][2] > 0
+            and facing(t)[0] < -0.5]
     if not rear:
         return None
-    pts = []
-    for t in sorted(rear, key=area, reverse=True)[:2]:
-        for p, _ in t[0]:
-            if all(sum((a - b) ** 2 for a, b in zip(p, q)) > 1e-6 for q in pts):
-                pts.append(p)
-    pts = pts[:4]
+    back = facing(min(rear, key=lambda t: facing(t)[0]))
+    rear = [t for t in rear if sum(a * b for a, b in zip(facing(t), back)) > math.cos(math.radians(25))]
+    pts = lamp_texels(rear, paint, True) or lamp_texels(rear, paint, False)
     if len(pts) < 4:
         return None
-    mid = [sum(p[i] for p in pts) / 4 for i in range(3)]
-    # order the corners around the middle (in the y-z plane, seen from behind)
-    pts.sort(key=lambda p: math.atan2(p[1] - mid[1], -(p[2] - mid[2])))
-    n = norm(cross([b - a for a, b in zip(pts[0], pts[1])], [b - a for a, b in zip(pts[0], pts[2])]))
-    if n[0] > 0:
-        pts.reverse()
-        n = tuple(-c for c in n)
-    return [round(m + (c - m) * 0.85 + d * 0.01, 3) for p in pts for c, m, d in zip(p, mid, n)]
+    # convex hull in the y-z plane, wound one way, then cut down to 6 corners by dropping the
+    # corner that cuts off least
+    pts = sorted(set(pts), key=lambda p: (p[2], p[1]))
+    turn = lambda o, a, b: (a[2] - o[2]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[2] - o[2])
+    hull = []
+    for seq in (pts, pts[::-1]):
+        part = []
+        for p in seq:
+            while len(part) >= 2 and turn(part[-2], part[-1], p) <= 1e-9:
+                part.pop()
+            part.append(p)
+        hull += part[:-1]
+    while len(hull) > 6:
+        cut = lambda i: abs(turn(hull[i - 1], hull[i], hull[(i + 1) % len(hull)]))
+        hull.pop(min(range(len(hull)), key=cut))
+    n = norm([sum(nn[i] for t in rear for _, nn in t[0]) for i in range(3)])
+    face = norm(cross([b - a for a, b in zip(hull[0], hull[1])], [b - a for a, b in zip(hull[0], hull[2])]))
+    if sum(a * b for a, b in zip(face, n)) < 0:
+        hull.reverse()
+    return [round(c + d * 0.01, 3) for p in hull for c, d in zip(p, n)]
 
 
 def lamp_centres(gt2, paint, dy):
@@ -645,7 +684,7 @@ def lamp_centres(gt2, paint, dy):
     head = centre([t for t in left if t[4] == LAMP and centre([t])[0] > 0])
     pals = {t[2] for t in left if t[4] == LAMP and centre([t])[0] > 0}
     fog = centre([t for t in left if t[4] == ORDERED and t[2] in pals and centre([t])[0] > 0])
-    tail = tail_light(tris) or centre([t for t in left if t[4] == LAMP and centre([t])[0] < 0])
+    tail = tail_light(tris, paint) or centre([t for t in left if t[4] == LAMP and centre([t])[0] < 0])
     return {"head_lamp": head, "fog_lamp": fog or head, "tail_lamp": tail}
 
 

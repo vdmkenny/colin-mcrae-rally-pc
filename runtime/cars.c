@@ -145,12 +145,14 @@ static void put_point(uint32_t a, const float *p, float z) {
 }
 
 // The game keeps per car the name the stage screens show and where its lamps glow; for a race
-// with an extra car its base car's entries take the extra car's.
+// with an extra car its base car's entries take the extra car's. The name has the room of the base
+// car's; a longer one gives way to the short name.
 static void patch_game_name(const ExtraCar *car) {
     uint32_t name = RD32(GAME_CAR_NAMES + (uint32_t)car->base * 4);
     size_t room = 0;
     while (room < 64 && RD8(name + (uint32_t)room)) room++;
-    for (size_t i = 0; i < room; i++) WR8(name + (uint32_t)i, i < strlen(car->name) ? (uint8_t)car->name[i] : 0);
+    const char *s = strlen(car->name) <= room ? car->name : car->short_name;
+    for (size_t i = 0; i < room; i++) WR8(name + (uint32_t)i, i < strlen(s) ? (uint8_t)s[i] : 0);
 }
 
 static void patch_game_lamps(const ExtraCar *car) {

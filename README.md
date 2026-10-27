@@ -223,7 +223,7 @@ is in `docs/car-files.md`):
 
 ```
 name = SUBARU VIVIO RX-RA     # car menu name
-short_name = VIVIO RX-RA
+short_name = VIVIO RX-RA      # also in races when the name is longer than the base car's
 base = SUBARU                 # disc car for handling, sounds and records
 bhp = 63                      # shown in the car menu
 wheelbase = 2310
@@ -232,7 +232,8 @@ mass = 750                    # kg (optional; every disc car is 1120)
 ```
 
 `tools/gt2car.py` also writes where the lamps are, for the glows and the brake lights the game
-draws over them (`head_lamp`, `fog_lamp`, `tail_lamp`), and how far the base car's physics
+draws over them (`head_lamp`, `fog_lamp`, and `tail_lamp`, 4 to 6 points tracing the left
+tail lamp's red lens), and how far the base car's physics
 lowers smaller wheels (`wheel_drop`, for the car menu's model, which has no physics).
 
 Files the folder lacks come from the base car, whose class the mode's rules (kit cars, bonus

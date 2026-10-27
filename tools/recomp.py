@@ -29,6 +29,11 @@ MODULES = [
 
 FUNCS_PER_FILE = 150
 
+# instructions whose patched immediate or branch condition the generated code reads from RAM
+SMC_IMM_OPS = ("lui", "addi", "addiu", "ori", "andi", "xori", "slti", "sltiu",
+               "lb", "lbu", "lh", "lhu", "lw", "sb", "sh", "sw")
+SMC_BRANCH_OPS = ("beq", "bne", "blez", "bgtz", "bltz", "bgez")
+
 
 class Module:
     def __init__(self, name, path, base, entry, ghidra_funcs, extra_entries):
@@ -44,6 +49,7 @@ class Module:
         self.pgxp_regs = set()
         self.track_prov = False
         self.hooks = {}
+        self.smc = {}
 
     def insn(self, a):
         i = self.cache.get(a)
@@ -110,6 +116,66 @@ class Module:
                     pc = self.base + j * 4
                     if (w >> 26) == 3 and (((pc + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2)) == sj:
                         self.entries.add(pc + 8)
+
+    # ---------------------------------------------------------- self-modifying code
+    def find_smc(self):
+        """Instructions the program rewrites at run time.
+
+        The game patches immediates (polygon colours, clipping bounds) and branch
+        conditions into its own rendering code. Stores to a constant address inside the
+        code are found here, including stores through a pointer register that a caller
+        loads just before calling the storing function. The patched instructions read
+        their variable fields from RAM in the generated code.
+        """
+        code = set()
+        for e in self.entries:
+            code |= self.walk(e)[0]
+        stores = ("sb", "sh", "sw", "swl", "swr")
+        found = {}
+
+        def note(target, pc):
+            t = target & 0xFFFFFFFC
+            if t in code:
+                found.setdefault(t, set()).add((pc, target & 3, self.insn(pc).op))
+
+        for a in code:
+            i = self.insn(a)
+            if i.op in stores:
+                b = self.const_before(i.rs, a, self.base) if i.rs else 0
+                if b is not None:
+                    note(b + i.simm, a)
+        args = {}  # function -> its stores through a register the caller provides
+        for a in code:
+            i = self.insn(a)
+            if i.op != "jal" or not self.in_code(i.jump_target()):
+                continue
+            f = i.jump_target()
+            if f not in args:
+                args[f] = []
+                written = {0, 28, 29}
+                for s in sorted(self.walk(f)[0]):
+                    si = self.insn(s)
+                    if si.op in stores and si.rs not in written:
+                        args[f].append(s)
+                    written |= si.writes()
+            for s in args[f]:
+                b = self.const_before(self.insn(s).rs, a + 8, self.base)
+                if b is not None:
+                    note(b + self.insn(s).simm, s)
+        self.smc = {}
+        for t, writers in sorted(found.items()):
+            i = self.insn(t)
+            # only the immediate (low half) may change, or a branch's condition with its
+            # register and offset kept
+            imm_only = all(off + {"sb": 1, "sh": 2}.get(op, 4) <= 2 for _, off, op in writers)
+            if i.op in SMC_IMM_OPS and imm_only:
+                self.smc[t] = "imm"
+            elif i.op in SMC_BRANCH_OPS:
+                self.smc[t] = "branch"
+            else:
+                self.warnings.append(f"{t:08x}: patched at run time by "
+                                     + ", ".join(f"{pc:08x}" for pc, _, _ in sorted(writers))
+                                     + f", not supported ({i})")
 
     # ----------------------------------------------------------------- jump tables
     def const_before(self, reg, pc, lo_limit):
@@ -277,9 +343,15 @@ def emit_insn(m, i, out):
         if r != 0:
             out.append(f"R({r}) = {expr};")
 
+    # a patched immediate (self-modifying code) is read from the instruction in RAM
+    dyn = m.smc.get(i.pc) == "imm"
+    imm = f"RD16(0x{i.pc:08x}u)" if dyn else f"0x{i.imm:x}u"
+    simm = f"(uint32_t)(int16_t)RD16(0x{i.pc:08x}u)" if dyn else f"0x{i.simm & 0xFFFFFFFF:x}u"
     addr = f"{rs} + {i.simm}u" if i.simm >= 0 else f"{rs} - {-i.simm}u"
+    if dyn:
+        addr = f"{rs} + {simm}"
     if i.rs == 0:
-        addr = f"0x{i.simm & 0xFFFFFFFF:x}u"
+        addr = simm
     if o == "sll":
         if i.word != 0:
             setr(i.rd, f"{rt} << {i.sa}")
@@ -327,21 +399,21 @@ def emit_insn(m, i, out):
         setr(i.rd, f"{rs} < {rt}")
     elif o in ("addi", "addiu"):
         if i.rs == 0:
-            setr(i.rt, f"0x{i.simm & 0xFFFFFFFF:x}u")
+            setr(i.rt, simm)
         else:
-            setr(i.rt, f"{rs} + 0x{i.simm & 0xFFFFFFFF:x}u")
+            setr(i.rt, f"{rs} + {simm}")
     elif o == "slti":
-        setr(i.rt, f"(int32_t){rs} < {i.simm}")
+        setr(i.rt, f"(int32_t){rs} < (int32_t){simm}")
     elif o == "sltiu":
-        setr(i.rt, f"{rs} < 0x{i.simm & 0xFFFFFFFF:x}u")
+        setr(i.rt, f"{rs} < {simm}")
     elif o == "andi":
-        setr(i.rt, f"{rs} & 0x{i.imm:x}u")
+        setr(i.rt, f"{rs} & {imm}")
     elif o == "ori":
-        setr(i.rt, f"{rs} | 0x{i.imm:x}u")
+        setr(i.rt, f"{rs} | {imm}")
     elif o == "xori":
-        setr(i.rt, f"{rs} ^ 0x{i.imm:x}u")
+        setr(i.rt, f"{rs} ^ {imm}")
     elif o == "lui":
-        setr(i.rt, f"0x{i.imm << 16:x}u")
+        setr(i.rt, f"{imm} << 16" if dyn else f"0x{i.imm << 16:x}u")
     elif o == "lw" and m.track_prov and i.rt:
         # remember where the value came from: it may become a GTE input vertex
         out.append(f"{{ uint32_t a = {addr}; R({i.rt}) = RD32(a); pgxp_prov({i.rt}, a, R({i.rt})); }}")
@@ -536,7 +608,10 @@ def gen_function(m, entry, protos):
         ncyc = 0
         if i.is_branch:
             t = i.branch_target()
-            out.append(f"{{ int take = {branch_cond(i)};")
+            cond = branch_cond(i)
+            if m.smc.get(a) == "branch":
+                cond = f"smc_branch(c, 0x{a:08x}u, 0x{i.imm:04x}u)"
+            out.append(f"{{ int take = {cond};")
             if i.op in ("bltzal", "bgezal"):
                 out.append(f"R(31) = 0x{a + 8:08x}u;")
                 out.extend(dl)
@@ -654,9 +729,11 @@ def main():
         for a in m.hooks:
             m.entries.add(a)
             m.boundaries.add(a)
+        m.find_smc()
         nf, nfiles = generate(m, os.path.join(outdir, name))
         sources.append((name, nfiles))
-        print(f"{name}: {nf} functions in {nfiles} files, {len(m.warnings)} warnings")
+        print(f"{name}: {nf} functions in {nfiles} files, {len(m.smc)} patched instructions, "
+              f"{len(m.warnings)} warnings")
         with open(os.path.join(outdir, name, "warnings.txt"), "w") as f:
             f.write("\n".join(m.warnings) + "\n")
     with open(os.path.join(outdir, "modules.c"), "w") as f:

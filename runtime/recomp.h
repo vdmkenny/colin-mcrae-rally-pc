@@ -112,6 +112,26 @@ static inline void WR8(uint32_t a, uint32_t v) {
     mem_write_slow(a, v & 0xFF, 1);
 }
 
+// A conditional branch the program rewrites at run time: the condition comes from the
+// instruction in RAM; the compiled-in target (offset) must not change.
+static inline int smc_branch(CPU *c, uint32_t pc, uint32_t offset) {
+    uint32_t w = RD32(pc);
+    int32_t s = (int32_t)c->r[(w >> 21) & 31], t = (int32_t)c->r[(w >> 16) & 31];
+    if ((w & 0xFFFF) == offset) {
+        switch (w >> 26) {
+        case 1:
+            if (((w >> 16) & 0x1E) == 0) return (w >> 16) & 1 ? s >= 0 : s < 0;
+            break;
+        case 4: return s == t;
+        case 5: return s != t;
+        case 6: return s <= 0;
+        case 7: return s > 0;
+        }
+    }
+    psx_bad_insn(c, pc, w);
+    return 0;
+}
+
 // Unaligned load/store halves (little-endian R3000 semantics).
 static inline uint32_t op_lwl(uint32_t a, uint32_t rt) {
     uint32_t w = RD32(a & ~3u);

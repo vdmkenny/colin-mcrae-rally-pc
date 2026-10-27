@@ -15,6 +15,40 @@ This is an unofficial fan project, not affiliated with Codemasters or Sony.
 > and builds), not by reading every line. Expect rough edges, hacks and code that would not
 > pass a careful review; treat it as an experiment rather than a reference implementation.
 
+## Getting started
+
+1. **Have your own copy of the game.** You need a disc image of the North American
+   PlayStation release (SCUS-94474), ripped from your disc as a `.cue` file with its `.bin`
+   tracks. Nothing from the game is in this repository.
+2. **Install the build tools**: CMake, Ninja, Python 3, a C compiler and SDL3 3.2 or newer.
+
+   ```bash
+   brew install sdl3 cmake ninja                                  # macOS (Xcode command line tools for the compiler)
+   sudo apt install cmake ninja-build gcc python3 libsdl3-dev     # Debian 13 or newer
+   ```
+
+3. **Get the code and build it from your disc image.** The script checks the image, extracts
+   and recompiles the game's executables and builds the program:
+
+   ```bash
+   git clone https://github.com/vdmkenny/colin-mcrae-rally-pc.git
+   cd colin-mcrae-rally-pc
+   python3 tools/build_game.py "/path/to/Colin McRae Rally.cue"
+   ```
+
+4. **Play:**
+
+   ```bash
+   ./build/cmrally
+   ```
+
+   It remembers where your disc image is. A gamepad works as a DualShock; on the keyboard the
+   arrow keys steer and X, C, Z and S are the PlayStation's face buttons (see
+   [Controls](#controls)). F11 toggles fullscreen and Shift+Esc quits. Settings are saved in
+   `cmrally.ini`; [Options](#options) lists them.
+
+To add cars of your own, see [Extra cars](#extra-cars).
+
 ## Features
 
 - Native-resolution rendering: every primitive is redrawn at the window's pixel resolution
